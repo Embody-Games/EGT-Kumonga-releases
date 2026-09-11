@@ -7520,8 +7520,12 @@ Turn writes back on from the Kumonga menu, or stop viewing as them.`;
   var pendingOpen = false;
   function detach() {
     if (child && !child.closed) {
-      child.focus();
-      return;
+      if (child.document.hasFocus()) {
+        child.focus();
+        return;
+      }
+      trace("detach: window open but not in front \u2014 reopening in front");
+      closeChild("user");
     }
     saveSettings({ detached: true });
     const name = "kumonga_" + Date.now().toString(36);
@@ -7557,10 +7561,12 @@ Turn writes back on from the Kumonga menu, or stop viewing as them.`;
     child.addEventListener("focus", onFocus);
     window.addEventListener("beforeunload", closeOnQuit);
     window.addEventListener("beforeunload", warnAboutTimer);
+    const me = child;
     child.addEventListener("beforeunload", () => {
-      trace(`child beforeunload, closing=${closing}`);
+      trace(`child beforeunload, closing=${closing}${child === me ? "" : " (superseded window)"}`);
       if (closing === null) saveSettings({ detached: false });
       closing = null;
+      if (child !== me) return;
       setModalHost(null);
       themeWatcher?.disconnect();
       themeWatcher = null;
@@ -7737,7 +7743,14 @@ Turn writes back on from the Kumonga menu, or stop viewing as them.`;
   function render() {
     updateNag();
     if (!childRoot || !child || child.closed) return;
-    childRoot.innerHTML = renderPanel(viewModel());
+    try {
+      childRoot.innerHTML = renderPanel(viewModel());
+    } catch (e) {
+      const msg = String(e?.stack || e?.message || e);
+      trace(`render failed: ${msg}`);
+      childRoot.innerHTML = '<div class="err">Kumonga could not draw this screen. The details are in the load report.<br><small>' + esc(msg.split("\n")[0]) + "</small></div>";
+      return;
+    }
     clampMenu();
   }
   var POLL_FOCUSED_MS = 6e4;
@@ -9414,6 +9427,7 @@ The checklist has been reloaded \u2014 pick the item again.`
     } catch (e) {
       state.signingIn = false;
       state.error = e?.name === "SignInCancelled" ? null : e?.message || String(e);
+      if (state.error) trace(`sign-in failed: ${state.error}`);
       render();
     }
   }
