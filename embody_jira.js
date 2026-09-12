@@ -267,7 +267,7 @@
     let payload;
     const headers = { Accept: "application/json", ...opts.headers };
     if (opts.body !== void 0) {
-      payload = typeof opts.body === "string" ? opts.body : JSON.stringify(opts.body);
+      payload = Buffer.isBuffer(opts.body) || typeof opts.body === "string" ? opts.body : JSON.stringify(opts.body);
       if (!headers["Content-Type"]) headers["Content-Type"] = "application/json";
       headers["Content-Length"] = String(Buffer.byteLength(payload));
     }
@@ -292,14 +292,20 @@
           const chunks = [];
           res.on("data", (c) => chunks.push(c));
           res.on("end", () => settle(() => {
-            const text = Buffer.concat(chunks).toString("utf8");
+            const status = res.statusCode || 0;
+            const ok = status >= 200 && status < 300;
+            const buffer = Buffer.concat(chunks);
+            if (opts.raw && ok) {
+              resolve({ ok, status, json: null, text: "", headers: res.headers, buffer });
+              return;
+            }
+            const text = buffer.toString("utf8");
             let json = null;
             try {
               json = JSON.parse(text);
             } catch {
             }
-            const status = res.statusCode || 0;
-            resolve({ ok: status >= 200 && status < 300, status, json, text, headers: res.headers });
+            resolve({ ok, status, json, text, headers: res.headers });
           }));
           res.on("error", (e) => fail(`failed mid-response: ${e.message}`));
         }
@@ -316,6 +322,19 @@
       if (payload !== void 0) req.write(payload);
       req.end();
     });
+  }
+  async function requestBinary(url, headers, maxRedirects = 4, timeoutMs = 6e4) {
+    const origin = new URL(url).host;
+    let at = url;
+    for (let hop = 0; ; hop++) {
+      const same = new URL(at).host === origin;
+      const res = await requestWithRetry(at, { raw: true, headers: same ? headers : {}, timeoutMs });
+      const to = res.headers.location;
+      const location = Array.isArray(to) ? to[0] : to;
+      const redirect = res.status >= 300 && res.status < 400 && location;
+      if (!redirect || hop >= maxRedirects) return { ...res, url: at };
+      at = new URL(location, at).toString();
+    }
   }
   function errorMessage(res) {
     const j = res.json;
@@ -345,8 +364,8 @@
     return true;
   }
   var escapeHtml = (s) => s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
-  function httpResponse(title, body, status = "200 OK") {
-    const html = `<!doctype html><meta charset="utf-8"><title>${escapeHtml(title)}</title><body style="font:14px system-ui;padding:3rem;text-align:center"><h2>${escapeHtml(title)}</h2><p>${escapeHtml(body)}</p></body>`;
+  function httpResponse(title2, body, status = "200 OK") {
+    const html = `<!doctype html><meta charset="utf-8"><title>${escapeHtml(title2)}</title><body style="font:14px system-ui;padding:3rem;text-align:center"><h2>${escapeHtml(title2)}</h2><p>${escapeHtml(body)}</p></body>`;
     return [
       `HTTP/1.1 ${status}`,
       "Content-Type: text/html; charset=utf-8",
@@ -594,9 +613,9 @@
      * every caller waits on the same promise.
      */
     async accessToken() {
-      const current2 = vault.get(K_ACCESS);
+      const current3 = vault.get(K_ACCESS);
       const expiresAt = Number(vault.get(K_EXPIRES) || 0);
-      if (current2 && Date.now() < expiresAt - EXPIRY_MARGIN_MS) return current2;
+      if (current3 && Date.now() < expiresAt - EXPIRY_MARGIN_MS) return current3;
       if (!inFlightRefresh) {
         const refresh = vault.get(K_REFRESH);
         if (!refresh) throw new Error("Not signed in to Jira.");
@@ -663,7 +682,7 @@
   var withAuth = (token, opts) => ({
     method: opts.method,
     body: opts.body,
-    headers: { Authorization: `Bearer ${token}` }
+    headers: { ...opts.headers, Authorization: `Bearer ${token}` }
   });
   async function jira(path, opts = {}) {
     const { url, token } = await jiraBase();
@@ -931,8 +950,8 @@
     "Skipped"
   ];
   function missingItemStates(legend) {
-    const have = new Set(itemStatuses(legend).map((s) => s.label.toLowerCase()));
-    return WANTED_ITEM_STATES.filter((w) => !have.has(w.toLowerCase()));
+    const have2 = new Set(itemStatuses(legend).map((s) => s.label.toLowerCase()));
+    return WANTED_ITEM_STATES.filter((w) => !have2.has(w.toLowerCase()));
   }
   var ITEM_OVERLAY_STATES = ["Needs Changes", "In QA"];
   var OVERLAY_ALIASES = {
@@ -1050,12 +1069,12 @@
     CHECKLIST_FIELD
   ];
   var SEARCH_PROPERTIES = ["timer-running"];
-  function itemsInQa(task) {
-    return (task.checklist ?? []).filter((i) => isQa(statusOf(i, task.checklistFormat))).length;
+  function itemsInQa(task2) {
+    return (task2.checklist ?? []).filter((i) => isQa(statusOf(i, task2.checklistFormat))).length;
   }
-  function handedOver(task) {
-    const items = task.checklist ?? [];
-    return itemsInQa(task) > 0 || items.length > 0 && items.every((i) => i.resolved);
+  function handedOver(task2) {
+    const items = task2.checklist ?? [];
+    return itemsInQa(task2) > 0 || items.length > 0 && items.every((i) => i.resolved);
   }
   function runningElsewhere(tasks, me, localKey) {
     const mine = tasks.find((t) => t.timerRunning === true && t.key !== localKey && (!t.assignee || !me || t.assignee.accountId === me));
@@ -1150,12 +1169,12 @@
     const p = (n) => String(n).padStart(2, "0");
     return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
   }
-  function dueInfo(task, now) {
-    if (!task.duedate) return null;
+  function dueInfo(task2, now) {
+    if (!task2.duedate) return null;
     const today = now ?? /* @__PURE__ */ new Date();
     const todayKey = localDay(today);
-    if (task.duedate === todayKey) return { state: "today", text: "due today" };
-    const [y, m, d] = task.duedate.split("-").map(Number);
+    if (task2.duedate === todayKey) return { state: "today", text: "due today" };
+    const [y, m, d] = task2.duedate.split("-").map(Number);
     const due = new Date(y, m - 1, d);
     const midnight = new Date(today.getFullYear(), today.getMonth(), today.getDate());
     const days = Math.round((due.getTime() - midnight.getTime()) / 864e5);
@@ -1166,7 +1185,7 @@
     }
     if (days <= 3) return { state: "soon", text: days === 1 ? "due tomorrow" : `due in ${days} days` };
     const MONTHS2 = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-    return { state: "later", text: `due ${d} ${MONTHS2[m - 1] ?? task.duedate.slice(5, 7)}` };
+    return { state: "later", text: `due ${d} ${MONTHS2[m - 1] ?? task2.duedate.slice(5, 7)}` };
   }
   var PRIORITY_RANK2 = {
     Highest: 0,
@@ -1180,12 +1199,12 @@
     const due = (t) => t.duedate ?? "9999-99-99";
     return (a, b) => late(a) - late(b) || (PRIORITY_RANK2[a.priority] ?? 2) - (PRIORITY_RANK2[b.priority] ?? 2) || (due(a) < due(b) ? -1 : due(a) > due(b) ? 1 : 0);
   }
-  function progressLabel(task) {
-    if (task.checklist === null) {
+  function progressLabel(task2) {
+    if (task2.checklist === null) {
       return { text: "", complete: false, plain: true };
     }
-    const total = task.checklist.length;
-    const done = task.checklist.filter((i) => i.resolved).length;
+    const total = task2.checklist.length;
+    const done = task2.checklist.filter((i) => i.resolved).length;
     return { text: `${done}/${total}`, complete: total > 0 && done === total, plain: false };
   }
 
@@ -1616,13 +1635,13 @@
   }
 
   // src/model/footer.ts
-  function qaBlockedReason(task, map) {
-    if (task.checklist === null || task.checklist.length === 0) {
+  function qaBlockedReason(task2, map) {
+    if (task2.checklist === null || task2.checklist.length === 0) {
       const linked = map ? Object.keys(map.assets).length : 0;
       if (linked > 0) return null;
-      return task.checklist === null ? "Nothing is linked yet, so there is no model for the lead to look at." : "The checklist is empty and nothing is linked, so there is no model for the lead to look at.";
+      return task2.checklist === null ? "Nothing is linked yet, so there is no model for the lead to look at." : "The checklist is empty and nothing is linked, so there is no model for the lead to look at.";
     }
-    const open = task.checklist.filter((i) => !i.resolved && !isQa(statusOf(i, task.checklistFormat)));
+    const open = task2.checklist.filter((i) => !i.resolved && !isQa(statusOf(i, task2.checklistFormat)));
     if (!open.length) return null;
     const n = open.length;
     return `${n} checklist item${n === 1 ? "" : "s"} still open.`;
@@ -1630,31 +1649,31 @@
   var FOOTER_STATUSES = /* @__PURE__ */ new Set(["in progress", "qa"]);
   var HIDDEN = /* @__PURE__ */ new Set(["draft"]);
   var AFTER_QA_ONLY = /* @__PURE__ */ new Set(["complete", "needs changes"]);
-  function reachableFrom(to, task) {
-    return !AFTER_QA_ONLY.has(to) || underReview(task);
+  function reachableFrom(to, task2) {
+    return !AFTER_QA_ONLY.has(to) || underReview(task2);
   }
-  function underReview(task) {
-    return task.status.toLowerCase() === "qa" || handedOver(task);
+  function underReview(task2) {
+    return task2.status.toLowerCase() === "qa" || handedOver(task2);
   }
-  function approveBlockedReason(task) {
-    const items = task.checklist ?? [];
+  function approveBlockedReason(task2) {
+    const items = task2.checklist ?? [];
     const open = items.filter((i) => !i.resolved).length;
     if (!open) return null;
     return `${open} checklist item${open === 1 ? " is" : "s are"} not Done yet.`;
   }
-  function movesFor(task, transitions, map) {
+  function movesFor(task2, transitions, map) {
     const buttons = [];
     for (const t of transitions) {
       const to = t.to.toLowerCase();
-      if (to === task.status.toLowerCase()) continue;
+      if (to === task2.status.toLowerCase()) continue;
       if (HIDDEN.has(to)) continue;
-      if (!reachableFrom(to, task)) continue;
+      if (!reachableFrom(to, task2)) continue;
       if (to === "blocked") {
         buttons.push({ transitionId: t.id, label: "Block\u2026", to: t.to, kind: "danger" });
         continue;
       }
       if (to === "qa") {
-        const reason = qaBlockedReason(task, map);
+        const reason = qaBlockedReason(task2, map);
         buttons.push({
           transitionId: t.id,
           label: "Send to QA",
@@ -1665,7 +1684,7 @@
         continue;
       }
       if (to === "in progress") {
-        const from = task.status.toLowerCase();
+        const from = task2.status.toLowerCase();
         const label = from === "blocked" ? "Unblock" : from === "needs changes" ? "\u25B6 Resume work" : from === "qa" ? "Withdraw from QA" : /^(complete|done)$/.test(from) ? "Reopen" : "\u25B6 Start work";
         buttons.push({
           transitionId: t.id,
@@ -1679,16 +1698,16 @@
     }
     return buttons;
   }
-  function footerFor(task, transitions, map, review = false) {
-    const moves = movesFor(task, transitions, map);
-    if (review && underReview(task)) {
-      const held = approveBlockedReason(task);
+  function footerFor(task2, transitions, map, review = false) {
+    const moves = movesFor(task2, transitions, map);
+    if (review && underReview(task2)) {
+      const held = approveBlockedReason(task2);
       return moves.filter((b) => AFTER_QA_ONLY.has(b.to.toLowerCase())).map((b) => b.to.toLowerCase() === "complete" ? { ...b, label: "\u2713 Approve & close", kind: "go", blockedBy: held ?? void 0 } : { ...b, label: "Request changes\u2026", kind: "danger" }).sort((a, b) => (a.to.toLowerCase() === "complete" ? 1 : -1) - (b.to.toLowerCase() === "complete" ? 1 : -1));
     }
     return moves.filter((b) => FOOTER_STATUSES.has(b.to.toLowerCase())).sort((a, b) => a.to.toLowerCase() === "in progress" ? -1 : 1);
   }
-  function menuMovesFor(task, transitions, map) {
-    return movesFor(task, transitions, map).filter((b) => !FOOTER_STATUSES.has(b.to.toLowerCase()));
+  function menuMovesFor(task2, transitions, map) {
+    return movesFor(task2, transitions, map).filter((b) => !FOOTER_STATUSES.has(b.to.toLowerCase()));
   }
 
   // src/model/time.ts
@@ -2010,10 +2029,10 @@
     if (Object.keys(files).length === 0) {
       delete variants[req.variant];
     } else {
-      const current2 = asset.variants[req.variant].current;
+      const current3 = asset.variants[req.variant].current;
       variants[req.variant] = {
         files,
-        current: current2 && current2 !== req.version ? current2 : null
+        current: current3 && current3 !== req.version ? current3 : null
       };
     }
     const assets = { ...map.assets };
@@ -2294,9 +2313,9 @@
   function sharesOneFile(shape) {
     return shape.kind !== "none";
   }
-  function animationShape(task, formatId) {
-    if (!task.components.includes(ANIMATION_COMPONENT)) return { kind: "none" };
-    const tool = animationTool(task.labels);
+  function animationShape(task2, formatId) {
+    if (!task2.components.includes(ANIMATION_COMPONENT)) return { kind: "none" };
+    const tool = animationTool(task2.labels);
     if (tool === "Blender") return { kind: "blender" };
     if (tool === null) return { kind: "unknown" };
     if (!formatId) return { kind: "unknown" };
@@ -2382,7 +2401,7 @@
 
   // src/model/review.ts
   function targetKey(target) {
-    return `${target.kind}:${foldName(target.id)}`;
+    return `${target.kind}:${target.kind === "clip" ? normaliseClip(target.id) : foldName(target.id)}`;
   }
   function parseReviewProperty(value) {
     const kind = value?.target?.kind;
@@ -2394,9 +2413,57 @@
       // reads as dealt with when it is not is the failure that costs a handoff.
       status: value?.status === "resolved" ? "resolved" : "open",
       attachments: Array.isArray(value?.attachments) ? value.attachments.filter((a) => typeof a === "string") : [],
+      at: parsePin(value?.at),
+      camera: parseCamera(value?.camera),
+      range: parseRange(value?.range),
       resolvedBy: typeof value?.resolvedBy === "string" ? value.resolvedBy : null,
       resolvedAt: typeof value?.resolvedAt === "string" ? value.resolvedAt : null
     };
+  }
+  function parsePin(value) {
+    const time = Number(value?.time);
+    const frame = Number(value?.frame);
+    const fps = Number(value?.fps);
+    if (![time, frame, fps].every(Number.isFinite)) return null;
+    if (time < 0 || fps <= 0) return null;
+    return { time, frame: Math.round(frame), fps };
+  }
+  function parseRange(value) {
+    const from = parsePin(value?.from);
+    const to = parsePin(value?.to);
+    if (!from || !to || from.time > to.time) return null;
+    return { from, to };
+  }
+  var vec3 = (v) => Array.isArray(v) && v.length === 3 && v.every((n) => Number.isFinite(Number(n))) ? [Number(v[0]), Number(v[1]), Number(v[2])] : null;
+  function parseCamera(value) {
+    const position = vec3(value?.position);
+    const target = vec3(value?.target);
+    if (!position || !target) return null;
+    const out = {
+      projection: value?.projection === "orthographic" ? "orthographic" : "perspective",
+      position,
+      target
+    };
+    const zoom = Number(value?.zoom);
+    if (Number.isFinite(zoom) && zoom > 0) out.zoom = zoom;
+    const fov = Number(value?.fov);
+    if (Number.isFinite(fov) && fov > 0) out.fov = fov;
+    if (typeof value?.angle === "string" && value.angle.trim()) out.angle = value.angle.trim();
+    return out;
+  }
+  function pinAt(time, fps) {
+    const rate = Number.isFinite(fps) && fps > 0 ? fps : 24;
+    const t = Math.max(0, Math.round(time * 1e3) / 1e3);
+    return { time: t, frame: Math.round(t * rate), fps: rate };
+  }
+  function formatPin(at) {
+    return `f${at.frame} \xB7 ${at.time.toFixed(2)}s`;
+  }
+  function formatFrames(r) {
+    return `f${r.from.frame}\u2013f${r.to.frame}`;
+  }
+  function formatRange(r) {
+    return `${formatFrames(r)} \xB7 ${r.from.time.toFixed(2)}\u2013${r.to.time.toFixed(2)}s`;
   }
   function feedback(threads) {
     return threads.filter((t) => t.target !== null);
@@ -2416,13 +2483,22 @@
     }
     return out;
   }
+  function resolvedCounts(threads) {
+    const out = {};
+    for (const t of feedback(threads)) {
+      if (t.status !== "resolved") continue;
+      const key = targetKey(t.target);
+      out[key] = (out[key] ?? 0) + 1;
+    }
+    return out;
+  }
   function canPushForReview(threads) {
     return openThreads(threads).length === 0;
   }
-  function itemForTarget(task, target) {
-    if (target.kind !== "clip" || !task.checklist) return null;
+  function itemForTarget(task2, target) {
+    if (target.kind !== "clip" || !task2.checklist) return null;
     const want = targetKey(target);
-    return task.checklist.find((i) => targetKey({ kind: "clip", id: i.name }) === want) ?? null;
+    return task2.checklist.find((i) => targetKey({ kind: "clip", id: i.name }) === want) ?? null;
   }
 
   // src/ui/render.ts
@@ -2526,12 +2602,12 @@
     const open = detail.openAsset === id;
     const arrow = open ? "&#9652;" : "&#9662;";
     const gk = ` data-act="group" data-key="${esc(detail.key)}" data-asset="${esc(id)}"`;
-    const title = ' title="Versions and file actions"';
+    const title2 = ' title="Versions and file actions"';
     if (variants.length > 1 || asset.mode === "variant") {
-      return `<button class="vchip var"${gk}${title}>${files} file${files === 1 ? "" : "s"} ${arrow}</button>`;
+      return `<button class="vchip var"${gk}${title2}>${files} file${files === 1 ? "" : "s"} ${arrow}</button>`;
     }
     const { version } = primaryOf(asset, id, detail);
-    return `<button class="vchip${files > 1 ? "" : " one"}"${gk}${title}>${esc(version ?? "\u2014")}` + (files > 1 ? `<span class="vn"> +${files - 1}</span>` : "") + ` ${arrow}</button>`;
+    return `<button class="vchip${files > 1 ? "" : " one"}"${gk}${title2}>${esc(version ?? "\u2014")}` + (files > 1 ? `<span class="vn"> +${files - 1}</span>` : "") + ` ${arrow}</button>`;
   }
   function versionList(asset, id, detail) {
     if (detail.openAsset !== id) return "";
@@ -2539,7 +2615,7 @@
     let h = '<div class="vlist">';
     for (const variant of variantsOf(asset)) {
       const versions = versionsOf(asset, variant);
-      const current2 = currentVersion(asset, variant);
+      const current3 = currentVersion(asset, variant);
       if (multi) {
         h += `<div class="vhead"><span class="vhn">${esc(variant || "base")}</span><span class="vhc">${versions.length} version${versions.length === 1 ? "" : "s"}</span><button class="ib dim" data-act="newversion" data-key="${esc(detail.key)}" data-asset="${esc(id)}" data-variant="${esc(variant)}" title="Save what is open in Blockbench as the next version of this variant">+ version</button><button class="ib dim vdel" data-act="delvariant" data-key="${esc(detail.key)}" data-asset="${esc(id)}" data-variant="${esc(variant)}" title="Remove this variant and every path recorded under it">&#10005;</button></div>`;
       }
@@ -2548,7 +2624,7 @@
         const r = resolveVersion(asset, id, variant, version, detail);
         const openable = r.state === "ok" || r.state === "moved";
         const shown = r.state === "moved" ? r.found ?? "" : r.recorded ?? "";
-        h += `<div class="vrow${multi ? " ind" : ""}"><span class="vtag${version === current2 ? " cur" : ""}">${esc(version)}</span>` + (file2?.label ? `<span class="vlab">${esc(file2.label)}</span>` : "") + (r.state === "ok" ? `<span class="vpath">${esc(shown)}</span>` : r.state === "moved" ? `<span class="vpath w">${esc(shown)}</span>` : `<span class="vpath m">${esc(r.recorded ?? "missing")}</span>`) + (openable ? `<button class="ib" data-act="open" data-path="${esc(shown)}">Open</button><button class="ib dim" data-act="reveal" data-path="${esc(shown)}" title="Show in the file manager">&#128193;</button>` : "") + (r.state === "moved" ? `<button class="ib warn" data-act="repair" data-key="${esc(detail.key)}" data-asset="${esc(id)}" data-variant="${esc(variant)}" data-version="${esc(version)}" data-old="${esc(r.recorded ?? "")}" data-new="${esc(r.found ?? "")}">Fix</button>` : "") + (r.state === "missing" || r.state === "unpulled" ? `<button class="ib warn" data-act="locate" data-key="${esc(detail.key)}" data-asset="${esc(id)}" data-variant="${esc(variant)}" data-version="${esc(version)}" data-path="${esc(r.recorded ?? "")}" title="Point at the file this record should mean">Locate</button>` : "") + (version === current2 ? "" : `<button class="ib dim" data-act="makecurrent" data-key="${esc(detail.key)}" data-asset="${esc(id)}" data-variant="${esc(variant)}" data-version="${esc(version)}" title="Make this the version that ships">&#9733;</button>`) + `<button class="ib dim" data-act="movefile" data-key="${esc(detail.key)}" data-asset="${esc(id)}" data-variant="${esc(variant)}" data-version="${esc(version)}" data-path="${esc(r.recorded ?? "")}" title="Move or rename this file">&#8644;</button><button class="ib dim" data-act="unlink" data-key="${esc(detail.key)}" data-asset="${esc(id)}" data-variant="${esc(variant)}" data-version="${esc(version)}" data-path="${esc(r.recorded ?? "")}" title="Remove this file from the task. The file itself is not touched.">&#10005;</button></div>`;
+        h += `<div class="vrow${multi ? " ind" : ""}"><span class="vtag${version === current3 ? " cur" : ""}">${esc(version)}</span>` + (file2?.label ? `<span class="vlab">${esc(file2.label)}</span>` : "") + (r.state === "ok" ? `<span class="vpath">${esc(shown)}</span>` : r.state === "moved" ? `<span class="vpath w">${esc(shown)}</span>` : `<span class="vpath m">${esc(r.recorded ?? "missing")}</span>`) + (openable ? `<button class="ib" data-act="open" data-path="${esc(shown)}">Open</button><button class="ib dim" data-act="reveal" data-path="${esc(shown)}" title="Show in the file manager">&#128193;</button>` : "") + (r.state === "moved" ? `<button class="ib warn" data-act="repair" data-key="${esc(detail.key)}" data-asset="${esc(id)}" data-variant="${esc(variant)}" data-version="${esc(version)}" data-old="${esc(r.recorded ?? "")}" data-new="${esc(r.found ?? "")}">Fix</button>` : "") + (r.state === "missing" || r.state === "unpulled" ? `<button class="ib warn" data-act="locate" data-key="${esc(detail.key)}" data-asset="${esc(id)}" data-variant="${esc(variant)}" data-version="${esc(version)}" data-path="${esc(r.recorded ?? "")}" title="Point at the file this record should mean">Locate</button>` : "") + (version === current3 ? "" : `<button class="ib dim" data-act="makecurrent" data-key="${esc(detail.key)}" data-asset="${esc(id)}" data-variant="${esc(variant)}" data-version="${esc(version)}" title="Make this the version that ships">&#9733;</button>`) + `<button class="ib dim" data-act="movefile" data-key="${esc(detail.key)}" data-asset="${esc(id)}" data-variant="${esc(variant)}" data-version="${esc(version)}" data-path="${esc(r.recorded ?? "")}" title="Move or rename this file">&#8644;</button><button class="ib dim" data-act="unlink" data-key="${esc(detail.key)}" data-asset="${esc(id)}" data-variant="${esc(variant)}" data-version="${esc(version)}" data-path="${esc(r.recorded ?? "")}" title="Remove this file from the task. The file itself is not touched.">&#10005;</button></div>`;
       }
     }
     h += '<div class="vfoot">' + (multi ? "" : `<button class="ib" data-act="newversion" data-key="${esc(detail.key)}" data-asset="${esc(id)}" data-variant="${esc(currentVariant(asset))}" title="Save what is open in Blockbench as the next version">save as new version</button>`) + `<button class="ib" data-act="variant" data-key="${esc(detail.key)}" data-asset="${esc(id)}"` + (multi ? ' title="Add another variant">add variant</button>' : ' title="Name what is here, so a second variant can be added">name variant</button>') + `<button class="ib" data-act="linkvariant" data-key="${esc(detail.key)}" data-asset="${esc(id)}" title="Record the open .bbmodel as a file of one of these variants">link existing variant</button></div>`;
@@ -2569,14 +2645,14 @@
     }
     return out;
   }
-  function shapeOf(task, detail) {
+  function shapeOf(task2, detail) {
     const fmt = detail ? formatOfLinked(linkedPaths(detail), detail.disk) : null;
-    return animationShape(task, fmt);
+    return animationShape(task2, fmt);
   }
-  function clipReportFor(task, detail) {
+  function clipReportFor(task2, detail) {
     const names = detail?.clips?.names;
     if (!names) return null;
-    return assessClips((task.checklist ?? []).map((i) => i.name), names);
+    return assessClips((task2.checklist ?? []).map((i) => i.name), names);
   }
   function fbChip(vm, taskKey, kind, id, label = "") {
     if (vm.review?.key !== taskKey) return "";
@@ -2585,20 +2661,20 @@
     const attrs = `data-act="showfb" data-key="${esc(taskKey)}" data-kind="${kind}" data-id="${esc(id)}"` + (label && label !== id ? ` data-label="${esc(label)}"` : "");
     return `<button class="fbc" ${attrs} title="${n} open note${n === 1 ? "" : "s"} \u2014 open the review">${n}</button>`;
   }
-  function feedbackLine(task, vm) {
-    if (vm.page === "review" || vm.review?.key !== task.key) return "";
+  function feedbackLine(task2, vm) {
+    if (vm.page === "review" || vm.review?.key !== task2.key) return "";
     const open = openThreads(vm.review.threads).filter((t) => t.target);
     if (!open.length) return "";
     const who = [...new Set(open.map((t) => t.author))];
     const from = who.length === 1 ? who[0] : who.length === 2 ? `${who[0]} and ${who[1]}` : `${who[0]} and ${who.length - 1} others`;
     return `<div class="fbline"><span>${open.length} open note${open.length === 1 ? "" : "s"} from ${esc(from)}</span><button class="lnk" data-act="page" data-page="review">open Review</button></div>`;
   }
-  function clipItems(task) {
-    return (task.checklist ?? []).map((i) => ({
+  function clipItems(task2) {
+    return (task2.checklist ?? []).map((i) => ({
       index: i.index,
       name: i.name,
       raw: i.raw,
-      status: statusOf(i, task.checklistFormat)
+      status: statusOf(i, task2.checklistFormat)
     }));
   }
   function clipChip(report, name) {
@@ -2607,11 +2683,11 @@
     if (!state2) return '<span class="clipst"></span>';
     return state2 === "present" ? '<span class="clipst in" title="This animation is in the linked file">in file</span>' : '<span class="clipst out" title="No animation of this name in the linked file">not in file</span>';
   }
-  function clipSummary(task, detail, report, vm) {
+  function clipSummary(task2, detail, report, vm) {
     const clips = detail?.clips;
     if (!clips) return "";
-    const inQa = task.status === "QA";
-    const lead = !!task.component && vm.leadComponents.includes(task.component);
+    const inQa = task2.status === "QA";
+    const lead = !!task2.component && vm.leadComponents.includes(task2.component);
     const mayEdit = !inQa || lead;
     const file2 = `<code title="${esc(clips.path)}">${esc(baseOf(clips.path))}</code>`;
     if (clips.names === null) {
@@ -2622,13 +2698,13 @@
     const all = total > 0 && present === total;
     const head = total ? `<b class="${all ? "csall" : "cssome"}">${present} of ${total}</b> clip${total === 1 ? "" : "s"} on this checklist ${all ? "are" : "were found"} in ${file2}` : `${file2} holds ${clips.names.length} animation${clips.names.length === 1 ? "" : "s"}`;
     const live = clips.live ? ' <span class="cslive" title="Read from the project you have open, not from the saved file">unsaved changes included</span>' : "";
-    const items = clipItems(task);
+    const items = clipItems(task2);
     const canTick = tickable(items, report);
-    const tick2 = canTick.length && lead ? `<button class="ib go" data-act="tickclips" data-key="${esc(task.key)}">Mark ${canTick.length} Done</button>` : "";
+    const tick2 = canTick.length && lead ? `<button class="ib go" data-act="tickclips" data-key="${esc(task2.key)}">Mark ${canTick.length} Done</button>` : "";
     const stale = staleTicks(items, report);
     const staleLine = stale.length ? `<div class="csbad"><span class="csw">&#9888;</span><span>${stale.length === 1 ? "One finished clip is" : stale.length + " finished clips are"} not in the file: ` + stale.map((i) => `<b>${esc(i.name)}</b>`).join(", ") + ". Renamed, or is this the wrong file? Nothing has been changed.</span></div>" : "";
     const fresh = newClipNames(report.extra, items.map((i) => i.name));
-    const extra = report.extra.length ? `<div class="csx"><span class="csxh">${report.extra.length} animation${report.extra.length === 1 ? "" : "s"} in the file that this checklist does not mention` + (fresh.length && mayEdit ? ` <button class="ib" data-act="addclips" data-key="${esc(task.key)}">Add ${fresh.length} clip${fresh.length === 1 ? "" : "s"} to the checklist</button>` : "") + "</span>" + (fresh.length && mayEdit && inQa ? '<span class="kmwarn csqa">This task is in QA. Adding clips reopens the work, so it goes back to the artist as Needs Changes.</span>' : "") + report.extra.map((c) => `<span class="csxc">${esc(c)}</span>`).join("") + "</div>" : "";
+    const extra = report.extra.length ? `<div class="csx"><span class="csxh">${report.extra.length} animation${report.extra.length === 1 ? "" : "s"} in the file that this checklist does not mention` + (fresh.length && mayEdit ? ` <button class="ib" data-act="addclips" data-key="${esc(task2.key)}">Add ${fresh.length} clip${fresh.length === 1 ? "" : "s"} to the checklist</button>` : "") + "</span>" + (fresh.length && mayEdit && inQa ? '<span class="kmwarn csqa">This task is in QA. Adding clips reopens the work, so it goes back to the artist as Needs Changes.</span>' : "") + report.extra.map((c) => `<span class="csxc">${esc(c)}</span>`).join("") + "</div>" : "";
     return `<div class="clipsum${report.extra.length ? " note" : ""}"><div class="csline">${head}${live}${tick2}</div>` + staleLine + extra + "</div>";
   }
   function suggestion(name, detail) {
@@ -2688,54 +2764,54 @@
   function itemStateMenu(vm) {
     const open = vm.itemMenu;
     if (!open) return "";
-    const task = taskIn(vm, open.key);
-    const legend = task?.checklistFormat ?? null;
-    const lead = !!task?.component && vm.leadComponents.includes(task.component);
+    const task2 = taskIn(vm, open.key);
+    const legend = task2?.checklistFormat ?? null;
+    const lead = !!task2?.component && vm.leadComponents.includes(task2.component);
     const all = itemStatuses(legend);
     const states = lead ? all : all.filter((s) => s.label !== "Done");
     const doneHeld = states.length < all.length;
     const missing = missingItemStates(legend);
-    const current2 = task?.checklist?.find((i) => i.index === open.index) ?? null;
+    const current3 = task2?.checklist?.find((i) => i.index === open.index) ?? null;
     const at = vm.itemMenuAt;
     const pos = at ? ` style="top:${Math.round(at.y)}px;left:${Math.round(at.x)}px"` : "";
     const note = missing.length ? `<div class="mnote">${missing.map((m) => `<b>${esc(m)}</b>`).join(" and ")} ${missing.length === 1 ? "is" : "are"} not set up in Smart Checklist, so ${missing.length === 1 ? "it is" : "they are"} not offered here. Kumonga only ever writes a marker Smart Checklist has sent it, and these have not arrived on this task. Set one in Jira first; whatever comes back shows up here.</div>` : "";
     if (!states.length) {
       return `<div class="kmenu"${pos}><div class="mnote">Smart Checklist has not sent its list of statuses for this task, so there is nothing to choose from. Refresh, and check the checklist still exists in Jira.</div></div>`;
     }
-    const now = current2 ? statusOf(current2, legend) : null;
+    const now = current3 ? statusOf(current3, legend) : null;
     return `<div class="kmenu"${pos}>` + states.map((st) => `<button class="mi${st.label === now ? " on" : ""}" data-act="setitemstate" data-key="${esc(open.key)}" data-index="${open.index}" data-raw="${esc(open.raw)}" data-status="${esc(st.label)}">${esc(st.label)}</button>`).join("") + (doneHeld ? '<div class="mnote">Done is your lead\u2019s call. Mark it <b>In QA</b> when it is ready for review, and they mark it Done.</div>' : "") + note + "</div>";
   }
   function modelRow(opts) {
     const rowAct = opts.openPath ? ` data-act="open" data-path="${esc(opts.openPath)}" title="Open this model in Blockbench. Alt+click shows it in the file manager."` : "";
     return `<div class="item ${opts.rowClass}${opts.openPath ? " hit" : ""}"${rowAct}>` + (opts.markHtml ?? `<span class="mark ${opts.markClass}">${opts.markGlyph}</span>`) + `<span class="ipsl">${opts.pri ?? ""}</span><span class="iname ${opts.nameClass}${opts.grow ? " grow" : ""}" title="${esc(opts.name)}">${esc(opts.name)}</span>` + (opts.byName ?? "") + opts.body + opts.trailing + (opts.end ?? "") + (opts.tail ?? "") + "</div>" + opts.after;
   }
-  function taskModelRow(task, detail) {
+  function taskModelRow(task2, detail) {
     if (!detail?.hasRoot || detail.loading) return "";
     const hasModels = !!(detail.map && Object.keys(detail.map.assets).length);
     return modelRow({
       markGlyph: hasModels ? "&#43;" : "&#9679;",
       markClass: hasModels ? "m-add" : "m-free",
-      name: hasModels ? "Add another model" : task.summary,
+      name: hasModels ? "Add another model" : task2.summary,
       nameClass: hasModels ? "d" : "",
       // The suggestions stay either way — a task with one model linked may well
       // have a second file on disk waiting for it. Only the "no file yet" goes,
       // because that part was the lie.
       body: hasModels ? "" : '<span class="ipath n">no file yet</span>',
-      trailing: linkButton(task.key, null),
+      trailing: linkButton(task2.key, null),
       rowClass: "",
       // The suggestions go UNDER the row, wrapping, rather than in it: three
       // link buttons and a strip of variant guesses on one 460px line left the
       // strip scrolling inside the row behind a scrollbar of its own.
-      after: ((s) => s ? `<div class="isugg">${s}</div>` : "")(suggestion(task.summary, detail))
+      after: ((s) => s ? `<div class="isugg">${s}</div>` : "")(suggestion(task2.summary, detail))
     });
   }
-  function renderChecklistItem(item, detail, task, vm, oneFile = false, report = null) {
-    const taskKey = task.key;
+  function renderChecklistItem(item, detail, task2, vm, oneFile = false, report = null) {
+    const taskKey = task2.key;
     const nameClass = item.resolved ? item.marker === "x" ? "s" : "d" : "";
     const found = detail?.map ? assetForItem(detail.map, item.name) : null;
-    const time = estimateChip(item, detail, hasTimeColumn(task, detail)) + itemTimerButton(task, vm, item.name);
+    const time = estimateChip(item, detail, hasTimeColumn(task2, detail)) + itemTimerButton(task2, vm, item.name);
     const stale = !!report && item.resolved && report.states[item.name] === "missing";
-    const state2 = markerButton(item, taskKey, false, task.checklistFormat);
+    const state2 = markerButton(item, taskKey, false, task2.checklistFormat);
     const clipFb = oneFile ? fbChip(vm, taskKey, "clip", item.name) : "";
     const end = itemMetaChips(item);
     const pri = item.priority ? priorityGlyph(item.priority) : "";
@@ -2786,8 +2862,8 @@
     const file2 = allFiles(asset)[0];
     return file2 ? baseOf(file2.path).replace(/\.bbmodel$/i, "") : id;
   }
-  function renderLooseAssets(task, vm, detail) {
-    const claimed = (task.checklist ?? []).map((i) => i.name);
+  function renderLooseAssets(task2, vm, detail) {
+    const claimed = (task2.checklist ?? []).map((i) => i.name);
     const loose = unclaimedAssets(detail.map, claimed);
     if (!loose.length) return "";
     return loose.map(([id, asset]) => {
@@ -2805,15 +2881,15 @@
         // most Model/Texture tasks on this instance have no checklist at all, so
         // a loose row IS the deliverable (D-23). Leaving the chip off them made
         // the review unreachable on the majority of tasks (D-65).
-        byName: fbChip(vm, task.key, "asset", id, assetLabel(id, asset)),
+        byName: fbChip(vm, task2.key, "asset", id, assetLabel(id, asset)),
         trailing: rowFix(asset, id, detail) + versionChip(asset, id, detail),
         rowClass: worst === "moved" ? "alert" : worst === "missing" || worst === "unpulled" ? "miss" : "",
         after: subnote(asset, id, detail, vm) + versionList(asset, id, detail)
       });
     }).join("");
   }
-  function renderDetail(task, detail) {
-    if (!detail || detail.key !== task.key) return "";
+  function renderDetail(task2, detail) {
+    if (!detail || detail.key !== task2.key) return "";
     if (detail.loading) return '<div class="nochk">Reading files\u2026</div>';
     if (detail.error) return `<div class="err">${esc(detail.error)}</div>`;
     if (!detail.hasRoot) {
@@ -2821,21 +2897,21 @@
     }
     return "";
   }
-  function canTime(task, vm) {
+  function canTime(task2, vm) {
     if (!vm.clockwork) return false;
-    if (vm.me && task.assignee && task.assignee.accountId !== vm.me) return false;
-    return !/^(blocked|qa|complete|done)$/i.test(task.status);
+    if (vm.me && task2.assignee && task2.assignee.accountId !== vm.me) return false;
+    return !/^(blocked|qa|complete|done)$/i.test(task2.status);
   }
-  function timing(task, vm) {
-    return vm.timer?.issueKey === task.key || vm.externalTimer === task.key;
+  function timing(task2, vm) {
+    return vm.timer?.issueKey === task2.key || vm.externalTimer === task2.key;
   }
-  function timerButton(task, vm) {
-    if (!canTime(task, vm)) return "";
-    const running = timing(task, vm);
-    return running ? `<button class="tmbtn on" data-act="stoptimer" data-key="${esc(task.key)}" title="Stop the timer and log the time">&#9632;</button>` : `<button class="tmbtn" data-act="starttimer" data-key="${esc(task.key)}" title="Start a timer on this task">&#9654;</button>`;
+  function timerButton(task2, vm) {
+    if (!canTime(task2, vm)) return "";
+    const running = timing(task2, vm);
+    return running ? `<button class="tmbtn on" data-act="stoptimer" data-key="${esc(task2.key)}" title="Stop the timer and log the time">&#9632;</button>` : `<button class="tmbtn" data-act="starttimer" data-key="${esc(task2.key)}" title="Start a timer on this task">&#9654;</button>`;
   }
-  function hasTimeColumn(task, detail) {
-    return (task.checklist ?? []).some((i) => i.estimate) || Object.keys(detail?.itemTime ?? {}).length > 0;
+  function hasTimeColumn(task2, detail) {
+    return (task2.checklist ?? []).some((i) => i.estimate) || Object.keys(detail?.itemTime ?? {}).length > 0;
   }
   function estimateChip(item, detail, column = false) {
     const tracked = detail?.itemTime?.[item.name] ?? 0;
@@ -2853,14 +2929,14 @@
     }
     return `<span class="iest" title="${esc(t)} tracked, no estimate. Tracked time is the worklogs whose description names this item.">${esc(t)}</span>`;
   }
-  function itemTimerButton(task, vm, item) {
-    if (!canTime(task, vm)) return "";
-    const running = vm.timer?.issueKey === task.key && vm.timer?.item === item;
-    return running ? `<button class="ib tmi on" data-act="stoptimer" data-key="${esc(task.key)}" title="Stop the timer and log the time">&#9632;</button>` : `<button class="ib tmi" data-act="starttimeritem" data-key="${esc(task.key)}" data-item="${esc(item)}" title="Start a timer on &quot;${esc(item)}&quot;">&#9654;</button>`;
+  function itemTimerButton(task2, vm, item) {
+    if (!canTime(task2, vm)) return "";
+    const running = vm.timer?.issueKey === task2.key && vm.timer?.item === item;
+    return running ? `<button class="ib tmi on" data-act="stoptimer" data-key="${esc(task2.key)}" title="Stop the timer and log the time">&#9632;</button>` : `<button class="ib tmi" data-act="starttimeritem" data-key="${esc(task2.key)}" data-item="${esc(item)}" title="Start a timer on &quot;${esc(item)}&quot;">&#9654;</button>`;
   }
-  function rowMenu(task, vm) {
-    const open = vm.menu === task.key;
-    return `<button class="kebab${open ? " on" : ""}" data-act="menu" data-key="${esc(task.key)}" title="More">&#8942;</button>`;
+  function rowMenu(task2, vm) {
+    const open = vm.menu === task2.key;
+    return `<button class="kebab${open ? " on" : ""}" data-act="menu" data-key="${esc(task2.key)}" title="More">&#8942;</button>`;
   }
   function floatingMenu(vm) {
     if (!vm.menu) return "";
@@ -2868,50 +2944,56 @@
     const item = (act, label) => `<button class="mi" data-act="${act}" data-key="${esc(key)}">${esc(label)}</button>`;
     const at = vm.menuAt;
     const pos = at ? ` style="top:${Math.round(at.y)}px;left:${Math.round(at.x)}px"` : "";
-    const task = taskIn(vm, key);
-    return `<div class="kmenu"${pos}>` + item("openjira", "Open task in Jira") + item("setcomponent", "Change component") + item("setpriority", "Set priority") + item("setdue", task?.duedate ? "Change due date" : "Set due date") + item("leavefb", "Leave feedback\u2026") + item("rebase", "Folder moved? Fix recorded paths\u2026") + moveEntries(task, key, vm) + "</div>";
+    const task2 = taskIn(vm, key);
+    return `<div class="kmenu"${pos}>` + item("openjira", "Open task in Jira") + item("setcomponent", "Change component") + item("setpriority", "Set priority") + item("setdue", task2?.duedate ? "Change due date" : "Set due date") + item("leavefb", "Leave feedback\u2026") + item("rebase", "Folder moved? Fix recorded paths\u2026") + moveEntries(task2, key, vm) + "</div>";
   }
-  function moveEntries(task, key, vm) {
-    if (!task) return "";
+  function moveEntries(task2, key, vm) {
+    if (!task2) return "";
     const ts = vm.transitions?.[key];
     if (!ts || ts.loading) return '<span class="mi mnote">Loading moves\u2026</span>';
     if (ts.error) return '<span class="mi mnote bad">Could not read moves</span>';
-    return menuMovesFor(task, ts.list, vm.detail?.key === key ? vm.detail.map : null).map((b) => `<button class="mi${b.kind === "danger" ? " bad" : ""}" data-act="move" data-key="${esc(key)}" data-transition="${esc(b.transitionId)}" data-to="${esc(b.to)}">${esc(b.label)}</button>`).join("");
+    return menuMovesFor(task2, ts.list, vm.detail?.key === key ? vm.detail.map : null).map((b) => `<button class="mi${b.kind === "danger" ? " bad" : ""}" data-act="move" data-key="${esc(key)}" data-transition="${esc(b.transitionId)}" data-to="${esc(b.to)}">${esc(b.label)}</button>`).join("");
   }
   function gitNotice(git) {
     if (!git) return "";
     if (git.error) {
       return '<div class="notice git bad">' + esc(git.error) + '<button data-act="pull">Try again</button></div>';
     }
-    if (git.behind < 1) return "";
+    if (git.behind < 1) return pushNotice(git);
     const n = git.behind;
     const checked = git.checkedAt ? ` Only checked, at ${new Date(git.checkedAt).toLocaleTimeString()} \u2014 nothing pulled yet.` : "";
     return `<div class="notice git"><b>${n} commit${n === 1 ? "" : "s"} to pull</b> on ${esc(git.branch)}` + (git.dirty ? " &mdash; you have uncommitted changes, so this may refuse." : git.ahead ? ` &mdash; and ${git.ahead} of yours to push.` : "") + esc(checked) + `<button data-act="pull"${git.pulling ? " disabled" : ""}>` + (git.pulling ? "Pulling\u2026" : "Pull") + "</button></div>";
   }
-  function renderFooter(task, vm) {
-    const ts = vm.transitions?.[task.key];
+  function pushNotice(git) {
+    if (git.ahead < 1 && !git.dirty) return "";
+    const n = git.ahead;
+    const head = n ? `<b>${n} commit${n === 1 ? "" : "s"} to push</b> on ${esc(git.branch)}` + (git.dirty ? " &mdash; and files not committed yet." : ".") : `<b>Files not committed yet</b> on ${esc(git.branch)}.`;
+    return '<div class="notice git push">' + head + ' Commit and push in GitHub Desktop so the team has your work.<button data-act="github">Open GitHub Desktop</button></div>';
+  }
+  function renderFooter(task2, vm) {
+    const ts = vm.transitions?.[task2.key];
     if (!ts) return "";
-    const reviewing = vm.page === "qa" && underReview(task);
-    if (vm.me && task.assignee && task.assignee.accountId !== vm.me && !reviewing) {
-      return `<div class="foot"><span class="fnote">Assigned to ${esc(task.assignee.name)}. Moves are in the task menu.</span></div>`;
+    const reviewing = vm.page === "qa" && underReview(task2);
+    if (vm.me && task2.assignee && task2.assignee.accountId !== vm.me && !reviewing) {
+      return `<div class="foot"><span class="fnote">Assigned to ${esc(task2.assignee.name)}. Moves are in the task menu.</span></div>`;
     }
     if (ts.loading) return '<div class="foot"><span class="fnote">Loading actions\u2026</span></div>';
     if (ts.error) {
       return `<div class="foot"><span class="fnote bad">${esc(ts.error)}</span></div>`;
     }
-    const detailLoading = vm.detail?.key === task.key && vm.detail.loading;
+    const detailLoading = vm.detail?.key === task2.key && vm.detail.loading;
     const buttons = footerFor(
-      task,
+      task2,
       ts.list,
-      vm.detail?.key === task.key ? vm.detail.map : null,
+      vm.detail?.key === task2.key ? vm.detail.map : null,
       vm.page === "qa"
     ).map((b) => b.blockedBy && detailLoading ? { ...b, blockedBy: "Checking what is linked\u2026" } : b);
-    const timer = footerTimer(task, vm);
+    const timer = footerTimer(task2, vm);
     if (!buttons.length && !timer) {
       return '<div class="foot"><span class="fnote">Jira offers no moves from here.</span></div>';
     }
     return '<div class="foot">' + timer + (buttons.length ? "" : '<span class="fnote">Jira offers no moves from here.</span>') + buttons.map(
-      (b) => `<button class="act ${b.kind}${b.blockedBy ? " off" : ""}" data-act="move" data-key="${esc(task.key)}" data-transition="${esc(b.transitionId)}" data-to="${esc(b.to)}"` + (b.blockedBy ? ` disabled title="${esc(b.blockedBy)}"` : "") + `>${esc(b.label)}</button>`
+      (b) => `<button class="act ${b.kind}${b.blockedBy ? " off" : ""}" data-act="move" data-key="${esc(task2.key)}" data-transition="${esc(b.transitionId)}" data-to="${esc(b.to)}"` + (b.blockedBy ? ` disabled title="${esc(b.blockedBy)}"` : "") + `>${esc(b.label)}</button>`
     ).join("") + (buttons.find((b) => b.blockedBy) ? `<span class="fnote">${esc(buttons.find((b) => b.blockedBy).blockedBy)}</span>` : "") + "</div>";
   }
   function timerStrip(vm) {
@@ -2928,66 +3010,66 @@
     }
     return '<div class="tmbar idle">' + open + `<span class="tmdot"></span><span class="tmkey">No timer running</span><button class="ib" data-act="logtimeday">Log time</button><span class="tmnote" title="Checked against Clockwork's record on each of your tasks">on your tasks</span></div>`;
   }
-  function footerTimer(task, vm) {
+  function footerTimer(task2, vm) {
     if (!vm.clockwork) return "";
-    if (vm.me && task.assignee && task.assignee.accountId !== vm.me) return "";
-    if (!timing(task, vm)) return "";
-    return `<button class="act danger" data-act="stoptimer" data-key="${esc(task.key)}">&#9632; Stop timer</button>`;
+    if (vm.me && task2.assignee && task2.assignee.accountId !== vm.me) return "";
+    if (!timing(task2, vm)) return "";
+    return `<button class="act danger" data-act="stoptimer" data-key="${esc(task2.key)}">&#9632; Stop timer</button>`;
   }
-  function renderTask(task, vm, showCrumb, showComponent) {
-    const detail = vm.detail && vm.detail.key === task.key ? vm.detail : null;
-    const fileCount = task.checklist === null && detail?.map ? Object.keys(detail.map.assets).length : null;
-    const expanded = vm.expanded === task.key;
-    const gated = task.scope === "untagged";
-    const progress = progressLabel(task);
-    const due = dueInfo(task, vm.now);
+  function renderTask(task2, vm, showCrumb, showComponent) {
+    const detail = vm.detail && vm.detail.key === task2.key ? vm.detail : null;
+    const fileCount = task2.checklist === null && detail?.map ? Object.keys(detail.map.assets).length : null;
+    const expanded = vm.expanded === task2.key;
+    const gated = task2.scope === "untagged";
+    const progress = progressLabel(task2);
+    const due = dueInfo(task2, vm.now);
     let cls = "task";
-    if (task.priority === "Low") cls += " low";
-    if (task.priority === "Lowest") cls += " lowest";
+    if (task2.priority === "Low") cls += " low";
+    if (task2.priority === "Lowest") cls += " lowest";
     if (gated) cls += " gated";
-    else if (task.status === "Blocked") cls += " blk";
-    else if (progress.complete && task.status === "In Progress") cls += " ready";
+    else if (task2.status === "Blocked") cls += " blk";
+    else if (progress.complete && task2.status === "In Progress") cls += " ready";
     if (expanded) cls += " sel";
     let hcls = "thead";
     if (gated) hcls += " gated";
-    else if (task.status === "Blocked") hcls += " blk";
-    else if (task.status === "Needs Changes") hcls += " chg";
-    else if (task.status === "QA") hcls += " qa";
-    else if (progress.complete && task.status === "In Progress") hcls += " ready";
+    else if (task2.status === "Blocked") hcls += " blk";
+    else if (task2.status === "Needs Changes") hcls += " chg";
+    else if (task2.status === "QA") hcls += " qa";
+    else if (progress.complete && task2.status === "In Progress") hcls += " ready";
     if (expanded) hcls += " sel";
-    const crumbEpic = task.epic && !(task.parent ?? "").toLowerCase().startsWith(task.epic.toLowerCase());
-    let h = `<div class="${cls}" data-key="${esc(task.key)}"><div class="${hcls}"${gated ? "" : ` data-act="toggle" data-key="${esc(task.key)}"`}><span class="tw">${gated ? "" : expanded ? "&#9660;" : "&#9654;"}</span><div class="tbody">` + (showCrumb && task.parent ? '<div class="crumb">' + (crumbEpic ? `<span class="ep">${esc(task.epic)}</span> &rsaquo; ` : "") + esc(task.parent) + "</div>" : "") + `<div class="trow"><span class="tkey">${esc(task.key)}</span><span class="tname">${esc(task.summary)}</span>` + (progress.plain ? fileCount !== null ? `<span class="prog plain">${fileCount} file${fileCount === 1 ? "" : "s"}</span>` : "" : `<span class="prog${progress.complete ? " all" : ""}">${progress.text}</span>`) + (gated ? "" : timerButton(task, vm)) + (gated ? "" : rowMenu(task, vm)) + '</div><div class="tmeta">' + priorityChip(task.priority) + (task.component ? showComponent ? `<span class="chip comp">${esc(task.component)}</span>` : "" : '<span class="chip notag">&#9888; no component</span>') + (task.components.includes(ANIMATION_COMPONENT) && !animationTool(task.labels) ? `<button class="chip ask" data-act="settool" data-key="${esc(task.key)}" title="Blockbench or Blender? Click to say.">animated where?</button>` : "") + (task.scope === "out" ? '<span class="chip off">out of scope</span>' : "") + task.labels.map((l) => `<span class="chip">${esc(l)}</span>`).join("") + (due ? `<span class="due ${due.state}">${esc(due.text)}</span>` : "") + (task.assignee && vm.page === "qa" ? `<span class="thours" title="Assignee, and hours logged on this task">${esc(task.assignee.name)}${task.hours ? ` \xB7 ${task.hours}h` : ""}</span>` : task.hours ? `<span class="thours" title="${task.hours}h logged on this task">${task.hours}h</span>` : "") + "</div></div></div>";
-    const reason = vm.transitions?.[task.key]?.reason;
-    if (task.status === "Blocked" && reason) {
+    const crumbEpic = task2.epic && !(task2.parent ?? "").toLowerCase().startsWith(task2.epic.toLowerCase());
+    let h = `<div class="${cls}" data-key="${esc(task2.key)}"><div class="${hcls}"${gated ? "" : ` data-act="toggle" data-key="${esc(task2.key)}"`}><span class="tw">${gated ? "" : expanded ? "&#9660;" : "&#9654;"}</span><div class="tbody">` + (showCrumb && task2.parent ? '<div class="crumb">' + (crumbEpic ? `<span class="ep">${esc(task2.epic)}</span> &rsaquo; ` : "") + esc(task2.parent) + "</div>" : "") + `<div class="trow"><span class="tkey">${esc(task2.key)}</span><span class="tname">${esc(task2.summary)}</span>` + (progress.plain ? fileCount !== null ? `<span class="prog plain">${fileCount} file${fileCount === 1 ? "" : "s"}</span>` : "" : `<span class="prog${progress.complete ? " all" : ""}">${progress.text}</span>`) + (gated ? "" : timerButton(task2, vm)) + (gated ? "" : rowMenu(task2, vm)) + '</div><div class="tmeta">' + priorityChip(task2.priority) + (task2.component ? showComponent ? `<span class="chip comp">${esc(task2.component)}</span>` : "" : '<span class="chip notag">&#9888; no component</span>') + (task2.components.includes(ANIMATION_COMPONENT) && !animationTool(task2.labels) ? `<button class="chip ask" data-act="settool" data-key="${esc(task2.key)}" title="Blockbench or Blender? Click to say.">animated where?</button>` : "") + (task2.scope === "out" ? '<span class="chip off">out of scope</span>' : "") + task2.labels.map((l) => `<span class="chip">${esc(l)}</span>`).join("") + (due ? `<span class="due ${due.state}">${esc(due.text)}</span>` : "") + (task2.assignee && vm.page === "qa" ? `<span class="thours" title="Assignee, and hours logged on this task">${esc(task2.assignee.name)}${task2.hours ? ` \xB7 ${task2.hours}h` : ""}</span>` : task2.hours ? `<span class="thours" title="${task2.hours}h logged on this task">${task2.hours}h</span>` : "") + "</div></div></div>";
+    const reason = vm.transitions?.[task2.key]?.reason;
+    if (task2.status === "Blocked" && reason) {
       h += `<div class="reason">${esc(reason)}</div>`;
     }
     if (gated) {
-      return h + `<div class="gate"><div class="gt">This task has no component</div><div class="gb">Without one it has no reviewer, so it cannot be sent to QA. Set a component to start work on it.</div><button class="ib" data-act="setcomponent" data-key="${esc(task.key)}">set component</button></div></div>`;
+      return h + `<div class="gate"><div class="gt">This task has no component</div><div class="gb">Without one it has no reviewer, so it cannot be sent to QA. Set a component to start work on it.</div><button class="ib" data-act="setcomponent" data-key="${esc(task2.key)}">set component</button></div></div>`;
     }
     if (expanded) {
-      const shape = shapeOf(task, detail);
+      const shape = shapeOf(task2, detail);
       const note = describeShape(shape);
       const blender = shape.kind === "blender";
       const files = blender ? null : detail;
-      h += blender ? "" : renderDetail(task, vm.detail ?? null);
-      h += feedbackLine(task, vm);
-      const loose = files?.map ? renderLooseAssets(task, vm, files) : "";
+      h += blender ? "" : renderDetail(task2, vm.detail ?? null);
+      h += feedbackLine(task2, vm);
+      const loose = files?.map ? renderLooseAssets(task2, vm, files) : "";
       if (note) h += `<div class="anote">${esc(note)}</div>`;
       const oneFile = sharesOneFile(shape);
-      if (blender && task.checklist === null) {
-      } else if (task.checklist === null) {
-        const add = taskModelRow(task, files);
+      if (blender && task2.checklist === null) {
+      } else if (task2.checklist === null) {
+        const add = taskModelRow(task2, files);
         h += loose || add ? '<div class="items">' + loose + add + "</div>" : '<div class="nochk">No checklist on this task &mdash; no models linked yet.</div>';
-      } else if (!task.checklist.length) {
+      } else if (!task2.checklist.length) {
         h += '<div class="nochk">Checklist is empty.</div>';
       } else {
-        const report = clipReportFor(task, files);
-        const clips = byPriority(task.checklist).map((i) => renderChecklistItem(i, files, task, vm, oneFile, report)).join("");
-        const cols = (report ? " wclip" : "") + (task.checklist.some((i) => i.priority) ? " wpri" : "") + (task.checklist.some((i) => i.due) ? " wmeta" : "") + (hasTimeColumn(task, files) ? " wtime" : "");
-        h += `<div class="items${cols}">` + (oneFile ? loose + taskModelRow(task, files) + clips : clips + loose) + "</div>";
-        h += clipSummary(task, files, report, vm);
+        const report = clipReportFor(task2, files);
+        const clips = byPriority(task2.checklist).map((i) => renderChecklistItem(i, files, task2, vm, oneFile, report)).join("");
+        const cols = (report ? " wclip" : "") + (task2.checklist.some((i) => i.priority) ? " wpri" : "") + (task2.checklist.some((i) => i.due) ? " wmeta" : "") + (hasTimeColumn(task2, files) ? " wtime" : "");
+        h += `<div class="items${cols}">` + (oneFile ? loose + taskModelRow(task2, files) + clips : clips + loose) + "</div>";
+        h += clipSummary(task2, files, report, vm);
       }
-      h += renderFooter(task, vm);
+      h += renderFooter(task2, vm);
     }
     return h + "</div>";
   }
@@ -3007,7 +3089,7 @@
     if (!vm.debug || !vm.debugMenuAt) return "";
     const at = vm.debugMenuAt;
     const item = (act, label) => `<button class="mi" data-act="${act}">${esc(label)}</button>`;
-    return `<div class="kmenu" style="top:${Math.round(at.y)}px;left:${Math.round(at.x)}px">` + item("viewas", "View as another artist\u2026") + (vm.viewingAs ? item("viewasoff", `Stop viewing as ${vm.viewingAs.name}`) + item("viewaswrites", vm.viewingAs.writes ? "Make view-as read-only" : "Allow changes again") : "") + item("devreload", "Reload plugin") + "</div>";
+    return `<div class="kmenu" style="top:${Math.round(at.y)}px;left:${Math.round(at.x)}px">` + item("viewas", "View as another artist\u2026") + (vm.viewingAs ? item("viewasoff", `Stop viewing as ${vm.viewingAs.name}`) + item("viewaswrites", vm.viewingAs.writes ? "Make view-as read-only" : "Allow changes again") : "") + item("reviewbardiag", "Why no review bar?") + item("devreload", "Reload plugin") + "</div>";
   }
   function plainError(message) {
     const m = message;
@@ -3083,19 +3165,25 @@
     }
     return body;
   }
-  function threadHead(t) {
+  function threadHead(t, taskKey) {
     const when = t.created ? t.created.slice(0, 10) : "";
-    return `<div class="thd"><span class="av">${esc((t.author || "?").slice(0, 1).toUpperCase())}</span><span class="who">${esc(t.author)}</span><span class="when">${esc(when)}</span>` + (t.status === "resolved" ? '<span class="rst">&#10003; resolved</span>' : '<span class="rst op">open</span>') + "</div>";
+    const seekable = t.at && t.target?.kind === "clip" ? "frame" : t.camera ? "view" : null;
+    const pin = seekable ? `<button class="pin" data-act="seeknote" data-comment="${esc(t.commentId)}" data-key="${esc(taskKey)}" title="${seekable === "frame" ? "Seek Blockbench to this frame and ghost the pose" + (t.range ? `, looping ${esc(formatRange(t.range))}` : "") + (t.camera ? ", from this camera" : "") : "Restore the camera this note was left from"}">` + (seekable === "frame" ? `@ ${esc(formatPin(t.at))}` : "") + (seekable === "frame" && t.range ? `<span class="pinrng">loop ${esc(formatFrames(t.range))}</span>` : "") + (t.camera ? '<span class="pincam" aria-label="camera saved">&#128247;</span>' : "") + "</button>" : "";
+    return `<div class="thd"><span class="av">${esc((t.author || "?").slice(0, 1).toUpperCase())}</span><span class="who">${esc(t.author)}</span><span class="when">${esc(when)}</span>` + pin + (t.status === "resolved" ? '<span class="rst">&#10003; resolved</span>' : '<span class="rst op">open</span>') + "</div>";
   }
-  function shots(t) {
+  function shots(t, vm) {
     if (!t.attachments.length) return "";
-    return '<div class="shots">' + t.attachments.map(
-      (id) => `<button class="shotb" data-act="openshot" data-shot="${esc(id)}" title="Open this screenshot in Jira">&#128247; screenshot</button>`
-    ).join("") + "</div>";
+    return '<div class="shots">' + t.attachments.map((id) => {
+      const url = vm.shots?.[id];
+      return url ? `<img class="shotimg" src="${esc(url)}" alt="screenshot" data-act="openshot" data-shot="${esc(id)}" title="Open this screenshot in Jira">` : `<button class="shotb" data-act="openshot" data-shot="${esc(id)}" title="Open this screenshot in Jira">&#128247; screenshot</button>`;
+    }).join("") + "</div>";
+  }
+  function del(commentId, taskKey) {
+    return `<button class="ib dim thdel" data-act="delfb" data-comment="${esc(commentId)}" data-key="${esc(taskKey)}" title="Delete this note from Jira \u2014 asks first">Delete\u2026</button>`;
   }
   function renderThread(vm, t, taskKey) {
-    const acts = t.status === "open" ? `<div class="thact"><button class="ib" data-act="replyfb" data-comment="${esc(t.commentId)}" data-key="${esc(taskKey)}">Reply</button><button class="ib go" data-act="resolvefb" data-comment="${esc(t.commentId)}" data-key="${esc(taskKey)}">Mark resolved</button></div>` : `<div class="thfoot">Resolved${t.resolvedAt ? " &middot; " + esc(t.resolvedAt.slice(0, 10)) : ""}<button class="ib dim" data-act="reopenfb" data-comment="${esc(t.commentId)}" data-key="${esc(taskKey)}">Reopen</button></div>`;
-    return `<div class="thread${t.status === "resolved" ? " done" : ""}">` + threadHead(t) + `<div class="tbody2">${esc(t.text)}</div>` + shots(t) + acts + "</div>";
+    const acts = t.status === "open" ? `<div class="thact"><button class="ib" data-act="replyfb" data-comment="${esc(t.commentId)}" data-key="${esc(taskKey)}">Reply</button><button class="ib go" data-act="resolvefb" data-comment="${esc(t.commentId)}" data-key="${esc(taskKey)}">Mark resolved</button>` + del(t.commentId, taskKey) + "</div>" : `<div class="thfoot">Resolved${t.resolvedAt ? " &middot; " + esc(t.resolvedAt.slice(0, 10)) : ""}<button class="ib dim" data-act="reopenfb" data-comment="${esc(t.commentId)}" data-key="${esc(taskKey)}">Reopen</button>` + del(t.commentId, taskKey) + "</div>";
+    return `<div class="thread${t.status === "resolved" ? " done" : ""}">` + threadHead(t, taskKey) + `<div class="tbody2">${esc(t.text)}</div>` + shots(t, vm) + acts + "</div>";
   }
   function renderReviewPage(vm) {
     const review = vm.review;
@@ -3108,7 +3196,7 @@
     if (review.error) return `<div class="err">${esc(review.error)}</div>`;
     const aim = vm.reviewTarget?.taskKey === review.key ? vm.reviewTarget : null;
     const open = openThreads(review.threads);
-    const task = vm.tasks.find((t) => t.key === review.key) ?? vm.qa?.queue.find((t) => t.key === review.key);
+    const task2 = vm.tasks.find((t) => t.key === review.key) ?? vm.qa?.queue.find((t) => t.key === review.key);
     let h = `<div class="rvhead">${esc(review.key)}` + (aim ? ` &middot; ${aim.kind === "asset" ? "model" : "clip"} <b>${esc(aim.label ?? aim.id)}</b>` : "") + (open.length ? `<span class="rvcnt">${open.length} open</span>` : '<span class="rvcnt ok">all resolved</span>') + (aim ? '<button class="ib dim" data-act="showall">Show all</button>' : "") + "</div>";
     const shown = aim ? threadsFor(review.threads, { kind: aim.kind, id: aim.id }) : review.threads.filter((t) => t.target !== null);
     if (!shown.length) {
@@ -3116,7 +3204,7 @@
     } else {
       h += shown.map((t) => renderThread(vm, t, review.key)).join("");
     }
-    const inRound = !task || /^(needs changes|in progress)$/i.test(task.status);
+    const inRound = !task2 || /^(needs changes|in progress)$/i.test(task2.status);
     h += '<div class="rvadd">' + (aim ? `<button class="ib go" data-act="newfb" data-key="${esc(review.key)}" data-kind="${aim.kind}" data-id="${esc(aim.id)}"` + (aim.label ? ` data-label="${esc(aim.label)}"` : "") + ">+ Add feedback</button>" : `<button class="ib go" data-act="leavefb" data-key="${esc(review.key)}">+ Leave feedback\u2026</button>`) + (inRound && canPushForReview(review.threads) && review.threads.some((t) => t.target) ? `<button class="ib" data-act="rerequest" data-key="${esc(review.key)}">Push for re-review</button>` : "") + "</div>";
     return h;
   }
@@ -3157,14 +3245,14 @@
     }
     return body;
   }
-  function renderQaTask(task, vm) {
-    return renderTask(task, vm, true, true);
+  function renderQaTask(task2, vm) {
+    return renderTask(task2, vm, true, true);
   }
   function leadPicker(vm) {
     const leads = vm.leads ?? [];
     if (leads.length < 2) return "";
-    const current2 = vm.viewingLead ?? vm.me ?? "";
-    return '<div class="qbar"><span class="qlab">Reviewing for</span><select data-act="lead">' + leads.map((l) => `<option value="${esc(l.accountId)}"${l.accountId === current2 ? " selected" : ""}>` + esc(l.accountId === vm.me ? `${l.name} (you)` : l.name) + esc(` \u2014 ${l.components.join(", ")}`) + "</option>").join("") + "</select></div>";
+    const current3 = vm.viewingLead ?? vm.me ?? "";
+    return '<div class="qbar"><span class="qlab">Reviewing for</span><select data-act="lead">' + leads.map((l) => `<option value="${esc(l.accountId)}"${l.accountId === current3 ? " selected" : ""}>` + esc(l.accountId === vm.me ? `${l.name} (you)` : l.name) + esc(` \u2014 ${l.components.join(", ")}`) + "</option>").join("") + "</select></div>";
   }
   var TRUNCATED = "Showing the first page only \u2014 there is more here than one request returns, so the counts are a floor.";
   function renderQaPage(vm) {
@@ -3203,7 +3291,17 @@
   function setModalHost(doc) {
     host = doc;
   }
+  var forcedDepth = 0;
+  async function inMainWindow(fn) {
+    forcedDepth++;
+    try {
+      return await fn();
+    } finally {
+      forcedDepth--;
+    }
+  }
   function hostDoc() {
+    if (forcedDepth > 0) return document;
     if (host && host.defaultView && !host.defaultView.closed) return host;
     return document;
   }
@@ -3211,10 +3309,10 @@
   function modalOpen() {
     return stack.length > 0;
   }
-  function shell(doc, title, buttons) {
+  function shell(doc, title2, buttons) {
     const overlay = doc.createElement("div");
     overlay.className = "kmodal";
-    overlay.innerHTML = `<div class="kmbox" role="dialog" aria-modal="true"><div class="kmtitle">${esc(title)}</div><div class="kmbody"></div><div class="kmfoot">` + buttons.map(
+    overlay.innerHTML = `<div class="kmbox" role="dialog" aria-modal="true"><div class="kmtitle">${esc(title2)}</div><div class="kmbody"></div><div class="kmfoot">` + buttons.map(
       (b, i) => `<button class="kmbtn${i === buttons.length - 1 ? " primary" : ""}" data-i="${i}">${esc(b)}</button>`
     ).join("") + "</div></div>";
     doc.body.appendChild(overlay);
@@ -3270,9 +3368,9 @@
     host2.appendChild(el);
     setTimeout(() => el.remove(), ms);
   }
-  function showMessage(title, text) {
+  function showMessage(title2, text) {
     const doc = hostDoc();
-    const s = shell(doc, title, ["Close"]);
+    const s = shell(doc, title2, ["Close"]);
     s.body.innerHTML = `<p class="kmtext">${esc(text)}</p>`;
     s.overlay.querySelector(".kmbtn")?.addEventListener("click", () => s.done(void 0));
     s.overlay.querySelector(".kmbtn")?.focus();
@@ -3294,9 +3392,9 @@
     select.focus();
     return s.promise;
   }
-  function confirmHtml(title, html, confirmLabel = "Confirm") {
+  function confirmHtml(title2, html, confirmLabel = "Confirm") {
     const doc = hostDoc();
-    const s = shell(doc, title, ["Cancel", confirmLabel]);
+    const s = shell(doc, title2, ["Cancel", confirmLabel]);
     s.body.innerHTML = html;
     const [cancel, confirm] = Array.from(s.overlay.querySelectorAll(".kmbtn"));
     cancel.addEventListener("click", () => s.done(false));
@@ -3950,6 +4048,10 @@ Jira stores paths relative to the root, so a ${what} outside it is one nobody el
     if (!m) return { behind: 0, ahead: 0 };
     return { behind: Number(m[1]), ahead: Number(m[2]) };
   }
+  function parseCount(out) {
+    const n = Number(out.trim());
+    return Number.isInteger(n) && n >= 0 ? n : 0;
+  }
   function parseDirty(out) {
     return out.trim().length > 0;
   }
@@ -3958,7 +4060,17 @@ Jira stores paths relative to the root, so a ${what} outside it is one nobody el
     if (!branch.ok || !branch.out) return null;
     const upstream = await runGit(repoRoot, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], 5e3);
     if (!upstream.ok || !upstream.out) {
-      return { branch: branch.out, upstream: null, behind: 0, ahead: 0, dirty: false };
+      const [local, status2] = await Promise.all([
+        runGit(repoRoot, ["rev-list", "--count", "HEAD", "--not", "--remotes"], 15e3),
+        runGit(repoRoot, ["status", "--porcelain"], 15e3)
+      ]);
+      return {
+        branch: branch.out,
+        upstream: null,
+        behind: 0,
+        ahead: local.ok ? parseCount(local.out) : 0,
+        dirty: parseDirty(status2.ok ? status2.out : "")
+      };
     }
     const [counts, status] = await Promise.all([
       runGit(repoRoot, ["rev-list", "--left-right", "--count", `${upstream.out}...HEAD`], 15e3),
@@ -4127,8 +4239,8 @@ Jira stores paths relative to the root, so a ${what} outside it is one nobody el
     return parseAssetMap(res.json?.value);
   }
   async function updateAssetMap(issueKey, mutate) {
-    const current2 = await getAssetMap(issueKey);
-    const next = mutate(current2);
+    const current3 = await getAssetMap(issueKey);
+    const next = mutate(current3);
     const res = await jira(propertyPath(issueKey), { method: "PUT", body: next });
     if (!res.ok) {
       throw new ApiError(res.status, explainFailure(res.status, errorMessage(res)));
@@ -4277,7 +4389,7 @@ Jira stores paths relative to the root, so a file outside it is one nobody else 
     }
     return { path: relative, assetId, version, variant };
     async function recordLink() {
-      await updateAssetMap(opts.taskKey, (current2) => addFileToMap(current2, {
+      await updateAssetMap(opts.taskKey, (current3) => addFileToMap(current3, {
         assetId,
         item: opts.itemText,
         variant,
@@ -4376,6 +4488,23 @@ Jira stores paths relative to the root, so a file outside it is one nobody else 
     return added;
   }
 
+  // src/model/notebody.ts
+  function wikiEscape(text) {
+    return text.replace(/[[\]{}!|_\-+^~?#]/g, "\\$&");
+  }
+  function safeAttachmentName(name) {
+    return !!name && !/[!|\r\n]/.test(name);
+  }
+  function wikiWithImages(text, filenames) {
+    const images = filenames.filter(safeAttachmentName).map((f) => `!${f}|width=560!`);
+    return [wikiEscape(text.trim()), ...images].filter(Boolean).join("\n\n");
+  }
+  function shotFilename(taskKey, clip, frame, now = Date.now()) {
+    const slug = (clip ?? "model").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "model";
+    const at = frame === null ? "" : `-f${frame}`;
+    return `kumonga-${taskKey}-${slug}${at}-${now.toString(36)}.png`;
+  }
+
   // src/jira/review.ts
   var REVIEW_PROPERTY = "com.embodygames.review";
   async function listReview(issueKey) {
@@ -4408,6 +4537,9 @@ Jira stores paths relative to the root, so a file outside it is one nobody else 
         target: parsed.target,
         status: parsed.status,
         attachments: parsed.attachments,
+        at: parsed.at,
+        camera: parsed.camera,
+        range: parsed.range,
         resolvedBy: parsed.resolvedBy,
         resolvedAt: parsed.resolvedAt,
         authorId: String(c?.author?.accountId ?? ""),
@@ -4429,13 +4561,13 @@ Jira stores paths relative to the root, so a file outside it is one nobody else 
       throw e;
     }
   }
-  async function postFeedback(issueKey, target, text, attachments = []) {
+  async function postFeedback(issueKey, target, text, attachments = [], at = null, camera = null, range = null) {
     const body = text.trim();
     if (!body) throw new Error("Feedback needs something in it.");
-    if (attachments.length) {
-      throw new Error("Attachments on feedback are not supported yet (M6).");
-    }
-    const created = await api(
+    const created = attachments.length ? await api(
+      `/rest/api/2/issue/${encodeURIComponent(issueKey)}/comment`,
+      { method: "POST", body: { body: wikiWithImages(body, attachments.map((a) => a.filename)) }, attempts: 1 }
+    ) : await api(
       `/rest/api/3/issue/${encodeURIComponent(issueKey)}/comment`,
       { method: "POST", body: { body: toADF(body) }, attempts: 1 }
     );
@@ -4446,6 +4578,9 @@ Jira stores paths relative to the root, so a file outside it is one nobody else 
         target,
         status: "open",
         attachments: attachments.map((a) => a.id),
+        at,
+        camera,
+        range,
         resolvedBy: null,
         resolvedAt: null
       });
@@ -4455,19 +4590,28 @@ Jira stores paths relative to the root, so a file outside it is one nobody else 
     }
   }
   async function setThreadStatus(commentId, status, accountId, at) {
-    const current2 = parseReviewProperty(await commentProperty(commentId));
-    if (!current2.target) {
+    const current3 = parseReviewProperty(await commentProperty(commentId));
+    if (!current3.target) {
       throw new Error("That comment is not scoped feedback, so it cannot be resolved.");
     }
     await putReviewProperty(commentId, {
-      target: current2.target,
+      target: current3.target,
       status,
-      attachments: current2.attachments,
+      attachments: current3.attachments,
+      at: current3.at,
+      camera: current3.camera,
+      range: current3.range,
       // Reopening clears who resolved it: the previous answer is no longer the
       // answer, and leaving a name on it reads as somebody standing behind it.
       resolvedBy: status === "resolved" ? accountId : null,
       resolvedAt: status === "resolved" ? at : null
     });
+  }
+  async function deleteFeedback(issueKey, commentId) {
+    await api(
+      `/rest/api/3/issue/${encodeURIComponent(issueKey)}/comment/${encodeURIComponent(commentId)}`,
+      { method: "DELETE", attempts: 1 }
+    );
   }
   async function putReviewProperty(commentId, value) {
     await api(
@@ -4476,24 +4620,1683 @@ Jira stores paths relative to the root, so a file outside it is one nobody else 
     );
   }
 
+  // src/core/multipart.ts
+  function multipart(parts, boundary2) {
+    const buffers = parts.map((p) => Buffer.isBuffer(p.data) ? p.data : Buffer.from(p.data, "utf8"));
+    let b = boundary2 ?? newBoundary();
+    while (buffers.some((buf) => buf.includes(b))) b = newBoundary();
+    const chunks = [];
+    parts.forEach((p, i) => {
+      let head = `--${b}\r
+Content-Disposition: form-data; name="${quote2(p.name)}"`;
+      if (p.filename !== void 0) head += `; filename="${quote2(p.filename)}"`;
+      head += "\r\n";
+      if (p.contentType) head += `Content-Type: ${p.contentType}\r
+`;
+      head += "\r\n";
+      chunks.push(Buffer.from(head, "utf8"), buffers[i], Buffer.from("\r\n", "utf8"));
+    });
+    chunks.push(Buffer.from(`--${b}--\r
+`, "utf8"));
+    return { body: Buffer.concat(chunks), contentType: `multipart/form-data; boundary=${b}` };
+  }
+  function quote2(s) {
+    return s.replace(/["\\]/g, "\\$&").replace(/[\r\n]/g, " ");
+  }
+  function newBoundary() {
+    let s = "----kumonga";
+    for (let i = 0; i < 24; i++) s += Math.floor(Math.random() * 36).toString(36);
+    return s;
+  }
+
+  // src/jira/attachments.ts
+  async function uploadAttachment(issueKey, filename, data, contentType) {
+    const form = multipart([{ name: "file", filename, contentType, data }]);
+    const list = await api(
+      `/rest/api/3/issue/${encodeURIComponent(issueKey)}/attachments`,
+      {
+        method: "POST",
+        body: form.body,
+        attempts: 1,
+        headers: { "Content-Type": form.contentType, "X-Atlassian-Token": "no-check" }
+      }
+    );
+    const first = Array.isArray(list) ? list[0] : null;
+    const id = String(first?.id ?? "");
+    if (!id) throw new Error("Jira accepted the upload but returned no attachment id.");
+    return { id, filename: String(first?.filename ?? filename) };
+  }
+  async function deleteAttachment(id) {
+    await api(`/rest/api/3/attachment/${encodeURIComponent(id)}`, { method: "DELETE", attempts: 1 });
+  }
+  async function fetchAttachment(id) {
+    const { url, token } = await jiraBase();
+    const res = await requestBinary(
+      `${url}/rest/api/3/attachment/content/${encodeURIComponent(id)}`,
+      { Authorization: `Bearer ${token}` }
+    );
+    if (!res.ok || !res.buffer) {
+      const fromJira = !res.url || new URL(res.url).host === new URL(url).host;
+      throw new ApiError(res.status, fromJira ? explainFailure(res.status, errorMessage(res)) : `The media store answered ${res.status} for that screenshot. ${errorMessage(res)}`);
+    }
+    const ct = res.headers["content-type"];
+    const contentType = (Array.isArray(ct) ? ct[0] : ct) || "application/octet-stream";
+    return { data: res.buffer, contentType: contentType.split(";")[0].trim() };
+  }
+
+  // src/core/shot.ts
+  async function captureViewport(maxWidth = 1280) {
+    if (typeof Preview === "undefined" || !Preview) return null;
+    const preview = Preview.selected ?? Preview.all?.[0];
+    const canvas = preview?.canvas;
+    if (!preview || !canvas) return null;
+    let dataUrl = "";
+    const grab = () => {
+      preview.render();
+      dataUrl = canvas.toDataURL("image/png");
+    };
+    try {
+      if (typeof Canvas !== "undefined" && typeof Canvas?.withoutGizmos === "function") Canvas.withoutGizmos(grab);
+      else grab();
+    } catch {
+      return null;
+    }
+    if (!dataUrl.startsWith("data:image/png;base64,")) return null;
+    let width = canvas.width;
+    let height = canvas.height;
+    if (width > maxWidth) {
+      const scaled = await downscale(dataUrl, maxWidth);
+      if (scaled) ({ dataUrl, width, height } = scaled);
+    }
+    const png = Buffer.from(dataUrl.slice("data:image/png;base64,".length), "base64");
+    return { png, dataUrl, width, height };
+  }
+  function downscale(dataUrl, maxWidth) {
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        try {
+          const scale = maxWidth / img.naturalWidth;
+          const c = document.createElement("canvas");
+          c.width = Math.round(img.naturalWidth * scale);
+          c.height = Math.round(img.naturalHeight * scale);
+          c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+          resolve({ dataUrl: c.toDataURL("image/png"), width: c.width, height: c.height });
+        } catch {
+          resolve(null);
+        }
+      };
+      img.onerror = () => resolve(null);
+      img.src = dataUrl;
+    });
+  }
+
+  // src/core/camera.ts
+  var round2 = (v) => Math.round(v * 100) / 100;
+  var vec32 = (arr) => [round2(arr[0] ?? 0), round2(arr[1] ?? 0), round2(arr[2] ?? 0)];
+  function cameraNow() {
+    if (typeof Preview === "undefined" || !Preview) return null;
+    const p = Preview.selected ?? Preview.all?.[0];
+    const cam = p?.camera;
+    if (!p || !cam?.position || !p.controls?.target) return null;
+    const ortho = !!p.isOrtho;
+    const out = {
+      projection: ortho ? "orthographic" : "perspective",
+      position: vec32(cam.position.toArray()),
+      target: vec32(p.controls.target.toArray())
+    };
+    if (ortho) {
+      const zoom = Number(cam.zoom);
+      if (Number.isFinite(zoom) && zoom > 0) out.zoom = Math.round(zoom * 1e4) / 1e4;
+      if (typeof p.angle === "string" && p.angle) out.angle = p.angle;
+    } else {
+      const fov = Number(cam.fov);
+      if (Number.isFinite(fov) && fov > 0) out.fov = round2(fov);
+    }
+    return out;
+  }
+  function restoreCamera(c) {
+    if (typeof Preview === "undefined" || !Preview) return false;
+    const p = Preview.selected ?? Preview.all?.[0];
+    if (!p || typeof p.loadAnglePreset !== "function") return false;
+    try {
+      p.loadAnglePreset({
+        projection: c.projection,
+        position: c.position,
+        target: c.target,
+        zoom: c.zoom,
+        fov: c.fov,
+        locked_angle: c.angle ?? void 0
+      });
+      p.controls?.update?.();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  // src/model/drawover.ts
+  var COLOURS = ["#ff3b30", "#ffd60a"];
+  function strokeWidth(imageWidth) {
+    return Math.max(2, Math.round(imageWidth / 320));
+  }
+  function pushOp(ops, op) {
+    if (op.tool === "pen" && op.points.length < 2) return [...ops];
+    if (op.tool !== "pen" && op.from.x === op.to.x && op.from.y === op.to.y) return [...ops];
+    return [...ops, op];
+  }
+  function undo(ops) {
+    return ops.slice(0, -1);
+  }
+  var hasMarks = (ops) => ops.length > 0;
+  function ellipseOf(from, to) {
+    return {
+      cx: (from.x + to.x) / 2,
+      cy: (from.y + to.y) / 2,
+      rx: Math.abs(to.x - from.x) / 2,
+      ry: Math.abs(to.y - from.y) / 2
+    };
+  }
+  function arrowHead(from, to, width) {
+    const dx = to.x - from.x;
+    const dy = to.y - from.y;
+    const len = Math.hypot(dx, dy);
+    if (!len) return null;
+    const size = Math.max(8, width * 4);
+    const ux = dx / len;
+    const uy = dy / len;
+    const bx = to.x - ux * size;
+    const by = to.y - uy * size;
+    const half = size * 0.5;
+    return [
+      { x: bx - uy * half, y: by + ux * half },
+      { x: bx + uy * half, y: by - ux * half }
+    ];
+  }
+  var MIN_CROP = 16;
+  function cropRect(from, to, imageWidth, imageHeight) {
+    const x0 = Math.max(0, Math.min(from.x, to.x));
+    const y0 = Math.max(0, Math.min(from.y, to.y));
+    const x1 = Math.min(imageWidth, Math.max(from.x, to.x));
+    const y1 = Math.min(imageHeight, Math.max(from.y, to.y));
+    const w = Math.round(x1 - x0);
+    const h = Math.round(y1 - y0);
+    if (w < MIN_CROP || h < MIN_CROP) return null;
+    return { x: Math.round(x0), y: Math.round(y0), w, h };
+  }
+  function toImage(clientX, clientY, rect, imageWidth, imageHeight) {
+    const sx = rect.width ? imageWidth / rect.width : 1;
+    const sy = rect.height ? imageHeight / rect.height : 1;
+    return {
+      x: Math.max(0, Math.min(imageWidth, (clientX - rect.left) * sx)),
+      y: Math.max(0, Math.min(imageHeight, (clientY - rect.top) * sy))
+    };
+  }
+
+  // src/ui/drawover.ts
+  function drawOver(shot) {
+    const doc = hostDoc();
+    const s = shell(doc, "Mark up the screenshot", ["Attach unmarked", "Attach with marks"]);
+    s.overlay.querySelector(".kmbox")?.classList.add("kmwide");
+    const tools = [
+      ["pen", "gesture", "Pen \u2014 drag to scribble"],
+      ["arrow", "north_east", "Arrow \u2014 drag from the tail to the point"],
+      ["ellipse", "radio_button_unchecked", "Ellipse \u2014 drag a box round the thing"],
+      ["crop", "crop", "Crop \u2014 drag the part to keep; drag again to change it"]
+    ];
+    s.body.innerHTML = '<div class="kdo-bar">' + tools.map(([t, icon2, title2]) => `<button class="kdo-t${t === "pen" ? " on" : ""}" data-tool="${t}" title="${title2}" type="button"><i class="material-icons">${icon2}</i></button>`).join("") + '<span class="kdo-sep"></span>' + COLOURS.map((c, i) => `<button class="kdo-c${i === 0 ? " on" : ""}" data-color="${c}" style="--c:${c}" title="${i === 0 ? "Red \u2014 this is wrong" : "Yellow \u2014 look here"}" type="button"></button>`).join("") + '<span class="kdo-sep"></span><button class="kdo-t" data-act="undo" title="Undo the last mark (Ctrl+Z)" type="button"><i class="material-icons">undo</i></button><button class="kdo-t" data-act="clear" title="Remove every mark" type="button"><i class="material-icons">delete_sweep</i></button><span class="kdo-hint">Drag to draw. Ctrl+Z undoes.</span></div><div class="kdo-wrap"><canvas class="kdo-canvas"></canvas></div>';
+    const canvas = s.body.querySelector(".kdo-canvas");
+    canvas.width = shot.width;
+    canvas.height = shot.height;
+    const ctx = canvas.getContext("2d");
+    const width = strokeWidth(shot.width);
+    const image = new Image();
+    let ops = [];
+    let tool = "pen";
+    let color = COLOURS[0];
+    let live = null;
+    let crop = null;
+    let cropStart = null;
+    let cropLive = null;
+    let history = [];
+    const paint = () => {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      if (image.complete && image.naturalWidth) ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+      for (const op of ops) paintOp(ctx, op);
+      if (live) paintOp(ctx, live);
+      const box = cropLive ?? crop;
+      if (box) paintCrop(ctx, box, canvas.width, canvas.height);
+    };
+    const undoLast = () => {
+      const last2 = history.pop();
+      if (last2 === "crop") crop = null;
+      else if (last2 === "op") ops = undo(ops);
+      paint();
+    };
+    image.onload = paint;
+    image.src = shot.dataUrl;
+    const setTool = (t) => {
+      tool = t;
+      s.body.querySelectorAll(".kdo-t[data-tool]").forEach((b) => b.classList.toggle("on", b.dataset.tool === t));
+    };
+    const setColor = (c) => {
+      color = c;
+      s.body.querySelectorAll(".kdo-c").forEach((b) => b.classList.toggle("on", b.dataset.color === c));
+    };
+    s.body.querySelector(".kdo-bar").addEventListener("click", (e) => {
+      const b = e.target.closest("button");
+      if (!b) return;
+      if (b.dataset.tool) setTool(b.dataset.tool);
+      else if (b.dataset.color) setColor(b.dataset.color);
+      else if (b.dataset.act === "undo") undoLast();
+      else if (b.dataset.act === "clear") {
+        ops = [];
+        crop = null;
+        history = [];
+        paint();
+      }
+    });
+    const at = (e) => toImage(e.clientX, e.clientY, canvas.getBoundingClientRect(), canvas.width, canvas.height);
+    canvas.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      canvas.setPointerCapture(e.pointerId);
+      const p = at(e);
+      if (tool === "crop") {
+        cropStart = p;
+        cropLive = null;
+        paint();
+        return;
+      }
+      live = tool === "pen" ? { tool, color, width, points: [p] } : { tool, color, width, from: p, to: p };
+      paint();
+    });
+    canvas.addEventListener("pointermove", (e) => {
+      const p = at(e);
+      if (cropStart) {
+        cropLive = cropRect(cropStart, p, canvas.width, canvas.height);
+        paint();
+        return;
+      }
+      if (!live) return;
+      if (live.tool === "pen") live.points.push(p);
+      else live.to = p;
+      paint();
+    });
+    const finish = () => {
+      if (cropStart) {
+        if (cropLive) {
+          crop = cropLive;
+          history.push("crop");
+        }
+        cropStart = null;
+        cropLive = null;
+        paint();
+        return;
+      }
+      if (!live) return;
+      const before = ops.length;
+      ops = pushOp(ops, live);
+      if (ops.length > before) history.push("op");
+      live = null;
+      paint();
+    };
+    canvas.addEventListener("pointerup", finish);
+    canvas.addEventListener("pointercancel", finish);
+    const onKey = (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
+        e.preventDefault();
+        e.stopPropagation();
+        undoLast();
+      }
+    };
+    doc.addEventListener("keydown", onKey, true);
+    const [unmarked, marked] = Array.from(s.overlay.querySelectorAll(".kmfoot .kmbtn"));
+    unmarked.addEventListener("click", () => s.done(false));
+    marked.addEventListener("click", () => s.done(true));
+    marked.focus();
+    return s.promise.then((withMarks) => {
+      doc.removeEventListener("keydown", onKey, true);
+      if (withMarks !== true || !hasMarks(ops) && !crop) return shot;
+      const box = crop ?? { x: 0, y: 0, w: shot.width, h: shot.height };
+      const out = doc.createElement("canvas");
+      out.width = box.w;
+      out.height = box.h;
+      const octx = out.getContext("2d");
+      octx.translate(-box.x, -box.y);
+      octx.drawImage(image, 0, 0, shot.width, shot.height);
+      for (const op of ops) paintOp(octx, op);
+      const dataUrl = out.toDataURL("image/png");
+      return {
+        png: Buffer.from(dataUrl.slice("data:image/png;base64,".length), "base64"),
+        dataUrl,
+        width: box.w,
+        height: box.h
+      };
+    });
+  }
+  function paintCrop(ctx, c, w, h) {
+    ctx.save();
+    ctx.fillStyle = "rgba(0,0,0,.55)";
+    ctx.beginPath();
+    ctx.rect(0, 0, w, h);
+    ctx.rect(c.x, c.y, c.w, c.h);
+    ctx.fill("evenodd");
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = Math.max(1, Math.round(w / 640));
+    ctx.setLineDash([6, 4]);
+    ctx.strokeRect(c.x + 0.5, c.y + 0.5, c.w - 1, c.h - 1);
+    ctx.restore();
+  }
+  function paintOp(ctx, op) {
+    ctx.save();
+    ctx.strokeStyle = op.color;
+    ctx.fillStyle = op.color;
+    ctx.lineWidth = op.width;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    if (op.tool === "pen") {
+      ctx.beginPath();
+      op.points.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y));
+      ctx.stroke();
+    } else if (op.tool === "arrow") {
+      ctx.beginPath();
+      ctx.moveTo(op.from.x, op.from.y);
+      ctx.lineTo(op.to.x, op.to.y);
+      ctx.stroke();
+      const head = arrowHead(op.from, op.to, op.width);
+      if (head) {
+        ctx.beginPath();
+        ctx.moveTo(op.to.x, op.to.y);
+        ctx.lineTo(head[0].x, head[0].y);
+        ctx.lineTo(head[1].x, head[1].y);
+        ctx.closePath();
+        ctx.fill();
+      }
+    } else {
+      const { cx, cy, rx, ry } = ellipseOf(op.from, op.to);
+      ctx.beginPath();
+      ctx.ellipse(cx, cy, Math.max(rx, 0.5), Math.max(ry, 0.5), 0, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // src/core/timeline.ts
+  var have = () => typeof Timeline !== "undefined" && !!Timeline && typeof Animation !== "undefined";
+  function selectedClip() {
+    if (!have()) return null;
+    const name = Animation.selected?.name;
+    return typeof name === "string" && name.trim() ? name : null;
+  }
+  function fpsOf(anim) {
+    const n = Number(anim?.snapping);
+    return Number.isFinite(n) && n > 0 ? n : 24;
+  }
+  function playheadFor(clip) {
+    if (!have()) return null;
+    const anim = Animation.selected;
+    if (!anim || normaliseClip(String(anim.name ?? "")) !== normaliseClip(clip)) return null;
+    return pinAt(Number(Timeline.time) || 0, fpsOf(anim));
+  }
+  function timelineLive() {
+    if (!have()) return null;
+    const anim = Animation.selected;
+    const range = Timeline.custom_range;
+    return {
+      clip: selectedClip(),
+      pin: anim ? pinAt(Number(Timeline.time) || 0, fpsOf(anim)) : null,
+      playing: !!Timeline.playing,
+      speed: Number(Timeline.playback_speed) || 100,
+      looping: Array.isArray(range) && (!!range[0] || !!range[1]),
+      onion: !!onionToggle()?.value,
+      ghost
+    };
+  }
+  function seekTo(clip, at) {
+    if (!have()) return false;
+    const want = normaliseClip(clip);
+    const anim = (Animation.all ?? []).find((a) => normaliseClip(String(a?.name ?? "")) === want);
+    if (!anim) return false;
+    try {
+      if (!Modes?.animate) Modes.options?.animate?.select?.();
+    } catch {
+    }
+    if (Animation.selected !== anim) anim.select();
+    Timeline.setTime(Math.min(at.time, Number(anim.length) || at.time));
+    Animator.preview();
+    return true;
+  }
+  function animationsInProject() {
+    if (!have()) return [];
+    return (Animation.all ?? []).filter((a) => typeof a?.name === "string" && typeof a?.uuid === "string").map((a) => ({ uuid: a.uuid, name: a.name }));
+  }
+  function createAnimation(name) {
+    if (!have() || !name.trim()) return false;
+    try {
+      const sibling = (Animation.all ?? [])[0];
+      const scope = sibling?.scope ?? (typeof Group !== "undefined" ? Group?.first_selected?.scope : void 0) ?? 0;
+      new Animation({
+        name: name.trim(),
+        path: sibling?.path || void 0,
+        group_name: sibling?.group_name || void 0,
+        scope,
+        saved: false
+      }).add(true);
+      return true;
+    } catch (e) {
+      trace(`create animation "${name}": ${e?.message || e}`);
+      return false;
+    }
+  }
+  function loopRangeNow() {
+    if (!have()) return null;
+    const range = Timeline.custom_range;
+    const anim = Animation.selected;
+    if (!anim || !Array.isArray(range) || !(range[0] || range[1])) return null;
+    const a = Number(range[0]) || 0;
+    const b = Number(range[1]) || 0;
+    if (b <= a) return null;
+    const fps = fpsOf(anim);
+    return { from: pinAt(a, fps), to: pinAt(b, fps) };
+  }
+  function setLoopRange(r) {
+    if (!have()) return;
+    const range = Timeline.custom_range;
+    if (!Array.isArray(range)) return;
+    range.splice(0, 2, r.from.time, r.to.time);
+    if (BarItems?.looped_animation_playback && !BarItems.looped_animation_playback.value) {
+      BarItems.looped_animation_playback.trigger?.();
+    }
+    try {
+      BARS?.updateConditions?.();
+    } catch {
+    }
+  }
+  function stepFrame(dir) {
+    if (!have()) return;
+    BarItems?.[dir < 0 ? "timeline_frame_back" : "timeline_frame_forth"]?.trigger?.();
+  }
+  function togglePlay() {
+    if (!have()) return;
+    BarItems?.play_animation?.trigger?.();
+  }
+  function setSpeed(pct) {
+    if (!have()) return;
+    Timeline.playback_speed = Math.max(1, Math.min(1e4, Math.round(pct)));
+    try {
+      BarItems?.slider_animation_speed?.update?.();
+    } catch {
+    }
+  }
+  function toggleLoopAround() {
+    if (!have()) return;
+    const range = Timeline.custom_range;
+    if (!Array.isArray(range)) return;
+    if (range[0] || range[1]) {
+      range.splice(0, 2, 0, 0);
+    } else {
+      const step = Number(Timeline.getStep?.()) || 1 / 24;
+      const t = Number(Timeline.time) || 0;
+      const max = Number(Animation.selected?.length) || t + step * 6;
+      range.splice(0, 2, Math.max(0, t - step * 6), Math.min(max, t + step * 6) || step * 6);
+      if (BarItems?.looped_animation_playback && !BarItems.looped_animation_playback.value) {
+        BarItems.looped_animation_playback.trigger?.();
+      }
+    }
+    try {
+      BARS?.updateConditions?.();
+    } catch {
+    }
+  }
+  function onionToggle() {
+    return typeof BarItems !== "undefined" ? BarItems?.animation_onion_skin : null;
+  }
+  function toggleOnionSkin() {
+    onionToggle()?.trigger?.();
+  }
+  var ghost = null;
+  function ghostAt(at) {
+    const toggle2 = onionToggle();
+    const opts = toggle2?.tool_config?.options;
+    if (!toggle2 || !opts || !have()) return false;
+    if (!at) {
+      ghost = null;
+      if (toggle2.value) toggle2.trigger?.();
+      opts.enabled = false;
+      return true;
+    }
+    opts.frames = "select";
+    opts.selective = false;
+    opts.enabled = true;
+    if (Timeline.vue) {
+      Timeline.vue.onion_skin_time = at.time;
+      Timeline.vue.onion_skin_selectable = true;
+    }
+    ghost = at;
+    if (!toggle2.value) toggle2.trigger?.();
+    else Animator.updateOnionSkin?.();
+    return true;
+  }
+
+  // src/ui/noteview.ts
+  function renderNoteView(notes, busy, error) {
+    return notes.map((n) => {
+      const flip = n.status === "open" ? "resolved" : "open";
+      return `<div class="knv-note${n.status === "resolved" ? " done" : ""}"><div class="knv-who"><b>${esc(n.author)}</b>` + (n.when ? `<span>${esc(n.when)}</span>` : "") + `<span class="knv-st ${n.status === "open" ? "op" : "ok"}">${n.status}</span></div><div class="knv-text">${esc(n.text)}</div>` + n.shots.map((u) => `<img class="knv-img" src="${esc(u)}" alt="screenshot">`).join("") + (n.attachments.length > n.shots.length ? `<div class="knv-pending">${n.attachments.length - n.shots.length} screenshot${n.attachments.length - n.shots.length === 1 ? "" : "s"} still loading \u2014 open the Review tab to fetch them.</div>` : "") + `<div class="knv-act"><button class="kmbtn${flip === "resolved" ? " primary" : ""}" type="button" data-act="flip" data-comment="${esc(n.commentId)}" data-to="${flip}"${busy === n.commentId ? " disabled" : ""}>` + (busy === n.commentId ? "Saving\u2026" : flip === "resolved" ? "Mark resolved" : "Reopen") + `</button><button class="kmbtn knv-del" type="button" data-act="del" data-comment="${esc(n.commentId)}" title="Delete this note from Jira \u2014 asks first"${busy === n.commentId ? " disabled" : ""}>Delete\u2026</button></div></div>`;
+    }).join("") + (error ? `<p class="kmbad">${esc(error)}</p>` : "");
+  }
+  var SNIP = 160;
+  function renderNoteList(rows, busy, error) {
+    if (!rows.length) return '<p class="kmnote">No notes on this clip under the current filters.</p>';
+    return rows.map(({ marker, note: n }) => {
+      const text = n.text.length > SNIP ? n.text.slice(0, SNIP) + "\u2026" : n.text;
+      return `<div class="knl-row${n.status === "resolved" ? " done" : ""}"><button class="kmbtn knl-go" type="button" data-act="go" data-comment="${esc(n.commentId)}" title="Seek to this frame">${esc(formatPin(marker))}</button><div class="knl-body"><div class="knv-who"><b>${esc(n.author)}</b>` + (n.when ? `<span>${esc(n.when)}</span>` : "") + (n.shots.length || n.attachments.length ? '<span class="knl-cam" title="Has a screenshot">&#128247;</span>' : "") + `<span class="knv-st ${n.status === "open" ? "op" : "ok"}">${n.status}</span></div><div class="knl-text">${esc(text)}</div></div>` + (n.status === "open" ? `<button class="kmbtn primary knl-tick" type="button" data-act="flip" data-comment="${esc(n.commentId)}" data-to="resolved"${busy === n.commentId ? " disabled" : ""}>${busy === n.commentId ? "Saving\u2026" : "Mark resolved"}</button>` : `<button class="kmbtn knl-tick" type="button" data-act="flip" data-comment="${esc(n.commentId)}" data-to="open"${busy === n.commentId ? " disabled" : ""}>${busy === n.commentId ? "Saving\u2026" : "Reopen"}</button>`) + "</div>";
+    }).join("") + (error ? `<p class="kmbad">${esc(error)}</p>` : "");
+  }
+  function openNoteList(markers, clip, hooks3) {
+    const rows = markers.flatMap((marker) => marker.notes.map((note) => ({ marker, note: { ...note } })));
+    const open = rows.filter((r) => r.note.status === "open").length;
+    const s = shell(document, `Notes on ${clip} \xB7 ${open} open`, ["Close"]);
+    s.overlay.querySelector(".kmbox")?.classList.add("kmmed");
+    let busy = null;
+    let error = null;
+    const paint = () => {
+      s.body.innerHTML = renderNoteList(rows, busy, error);
+    };
+    paint();
+    s.body.addEventListener("click", async (e) => {
+      const b = e.target.closest("[data-act]");
+      if (!b || busy) return;
+      const id = b.dataset.comment;
+      if (b.dataset.act === "go") {
+        s.done(null);
+        hooks3.jump(id);
+        return;
+      }
+      if (b.dataset.act !== "flip") return;
+      const to = b.dataset.to === "resolved" ? "resolved" : "open";
+      busy = id;
+      error = null;
+      paint();
+      try {
+        await hooks3.resolve(id, to);
+        const r = rows.find((x) => x.note.commentId === id);
+        if (r) r.note.status = to;
+      } catch (err) {
+        error = String(err?.message || err);
+      }
+      busy = null;
+      paint();
+    });
+    const [close] = Array.from(s.overlay.querySelectorAll(".kmfoot .kmbtn"));
+    close?.addEventListener("click", () => s.done(null));
+  }
+  function openNoteView(m, clip, hooks3) {
+    const notes = m.notes.map((n) => ({ ...n }));
+    const title2 = `${clip} \xB7 ${formatPin(m)}`;
+    const s = shell(document, title2, ["Close", "Jump here"]);
+    s.overlay.querySelector(".kmbox")?.classList.add("kmmed");
+    let busy = null;
+    let error = null;
+    const paint = () => {
+      s.body.innerHTML = renderNoteView(notes, busy, error);
+    };
+    paint();
+    s.body.addEventListener("click", async (e) => {
+      const b = e.target.closest("[data-act]");
+      if (!b || busy) return;
+      const id = b.dataset.comment;
+      if (b.dataset.act === "del") {
+        busy = id;
+        paint();
+        let gone = false;
+        try {
+          gone = await hooks3.remove(id);
+        } catch (err) {
+          error = String(err?.message || err);
+        }
+        busy = null;
+        if (gone) {
+          const at = notes.findIndex((x) => x.commentId === id);
+          if (at !== -1) notes.splice(at, 1);
+          if (!notes.length) {
+            s.done(null);
+            return;
+          }
+        }
+        paint();
+        return;
+      }
+      if (b.dataset.act !== "flip") return;
+      const to = b.dataset.to === "resolved" ? "resolved" : "open";
+      busy = id;
+      error = null;
+      paint();
+      try {
+        await hooks3.resolve(id, to);
+        const n = notes.find((x) => x.commentId === id);
+        if (n) n.status = to;
+      } catch (err) {
+        error = String(err?.message || err);
+      }
+      busy = null;
+      paint();
+    });
+    const [close, jump] = Array.from(s.overlay.querySelectorAll(".kmfoot .kmbtn"));
+    close.addEventListener("click", () => s.done(null));
+    jump.addEventListener("click", () => {
+      s.done(null);
+      if (notes[0]) hooks3.jump(notes[0].commentId);
+    });
+    close.focus();
+  }
+
+  // src/ui/notemarkers.ts
+  var NOTE_MARKERS_ID = "kumonga_note_markers";
+  var NOTE_LANE_ID = "kumonga_note_lane";
+  function noteMarkers(threads, clip, shots2 = {}) {
+    const want = targetKey({ kind: "clip", id: clip });
+    const byFrame = /* @__PURE__ */ new Map();
+    for (const t of threads) {
+      if (!t.at || t.target?.kind !== "clip" || targetKey(t.target) !== want) continue;
+      const key = Math.round(t.at.time * 1e3);
+      let m = byFrame.get(key);
+      if (!m) {
+        m = { time: t.at.time, frame: t.at.frame, fps: t.at.fps, open: 0, notes: [], range: null };
+        byFrame.set(key, m);
+      }
+      if (t.range) {
+        m.range = !m.range ? t.range : {
+          from: t.range.from.time < m.range.from.time ? t.range.from : m.range.from,
+          to: t.range.to.time > m.range.to.time ? t.range.to : m.range.to
+        };
+      }
+      if (t.status === "open") m.open++;
+      m.notes.push({
+        commentId: t.commentId,
+        author: t.author,
+        when: t.created ? t.created.slice(0, 10) : "",
+        status: t.status,
+        text: t.text.trim(),
+        camera: !!t.camera,
+        attachments: t.attachments,
+        shots: t.attachments.map((id) => shots2[id]).filter((u) => !!u)
+      });
+    }
+    const out = [...byFrame.values()].sort((a, b) => a.time - b.time);
+    for (const m of out) m.notes.sort((a, b) => a.status === b.status ? 0 : a.status === "open" ? -1 : 1);
+    return out;
+  }
+  var MAX_TIP_CHARS = 240;
+  function renderNoteMarkers(markers, size) {
+    return markers.map((m) => {
+      const first = m.notes[0];
+      const cls = m.open ? "knm knm-open" : "knm knm-done";
+      const rows = m.notes.map((n) => {
+        const text = n.text.length > MAX_TIP_CHARS ? n.text.slice(0, MAX_TIP_CHARS) + "\u2026" : n.text;
+        return `<div class="knm-note"><div class="knm-who"><b>${esc(n.author)}</b>` + (n.when ? `<span>${esc(n.when)}</span>` : "") + `<span class="knm-st ${n.status === "open" ? "op" : "ok"}">${n.status}</span></div><div class="knm-text">${esc(text)}</div>` + (n.shots.length ? '<div class="knm-imgs">' + n.shots.map(
+          (u) => `<img class="knm-img" src="${esc(u)}" data-comment="${esc(n.commentId)}" alt="screenshot" title="Click to open">`
+        ).join("") + "</div>" : n.attachments.length ? `<div class="knm-pending">${n.attachments.length} screenshot${n.attachments.length === 1 ? "" : "s"} loading\u2026</div>` : "") + "</div>";
+      }).join("");
+      const summary = m.notes.length === 1 ? m.open ? "1 open note" : "1 resolved note" : `${m.notes.length} notes${m.open ? `, ${m.open} open` : ", all resolved"}`;
+      const band = m.range ? `<div class="knm-band${m.open ? "" : " done"}" style="left:${Math.round(m.range.from.time * size * 100) / 100}px;width:${Math.max(2, Math.round((m.range.to.time - m.range.from.time) * size * 100) / 100)}px" title="${esc(formatPin(m))} is about ${esc(formatFrames(m.range))}"></div>` : "";
+      return band + `<div class="${cls}" style="left:${Math.round(m.time * size * 100) / 100}px" data-comment="${esc(first?.commentId ?? "")}" data-frame="${m.frame}" title="${esc(formatPin(m))} \u2014 ${esc(summary)}. Click to jump here."><i class="material-icons">mode_comment</i>` + (m.notes.length > 1 ? `<span class="knm-n">${m.notes.length}</span>` : "") + `<div class="knm-tip"><div class="knm-head">${esc(formatPin(m))}<span>${esc(summary)}</span></div>` + rows + `<div class="knm-foot">${m.notes.some((n) => n.camera) ? "Click to jump here and restore the view" : "Click to jump here"} &middot; Shift+click to open</div></div></div>`;
+    }).join("");
+  }
+  var NOTE_MARKERS_CSS = `
+#${NOTE_LANE_ID} { display: none; height: 20px; flex: none; align-items: stretch;
+  background: var(--color-back); border-bottom: 1px solid var(--color-border); }
+#${NOTE_LANE_ID}.on { display: flex; }
+#${NOTE_LANE_ID} .knl-head { flex: none; display: flex; align-items: center; gap: 4px; padding: 0 8px;
+  box-sizing: border-box; position: relative; z-index: 7; background: var(--color-ui);
+  color: var(--color-text); opacity: .75; font-size: 9px; text-transform: uppercase; letter-spacing: .05em;
+  border-right: 1px solid var(--color-border); white-space: nowrap; overflow: hidden; }
+#${NOTE_LANE_ID} .knl-head .material-icons { font-size: 12px; }
+#${NOTE_LANE_ID} .knl-track { flex: 1; position: relative; overflow: hidden; }
+#${NOTE_MARKERS_ID} { position: absolute; top: 0; bottom: 0; pointer-events: none; }
+#${NOTE_MARKERS_ID} .knm { position: absolute; top: 3px; margin-left: -8px; width: 16px; height: 14px;
+  z-index: 6; cursor: pointer; pointer-events: auto; color: #e78b8b; }
+/* The fade is on the icon, not the pin: the tooltip is the pin's child and
+   inherited it, and a 75% tooltip over keyframes was unreadable. */
+#${NOTE_MARKERS_ID} .knm-done { color: #79c98a; }
+#${NOTE_MARKERS_ID} .knm-done > .material-icons { opacity: .75; }
+#${NOTE_MARKERS_ID} .knm-band { position: absolute; bottom: 1px; height: 3px; border-radius: 2px;
+  background: rgba(231,139,139,.55); pointer-events: auto; }
+#${NOTE_MARKERS_ID} .knm-band.done { background: rgba(121,201,138,.45); }
+#${NOTE_MARKERS_ID} .knm > .material-icons { font-size: 14px; line-height: 1; display: block;
+  filter: drop-shadow(0 1px 1px rgba(0,0,0,.6)); }
+#${NOTE_MARKERS_ID} .knm:hover > .material-icons { transform: translateY(-1px); }
+#${NOTE_MARKERS_ID} .knm-n { position: absolute; top: -3px; right: -5px; min-width: 11px; height: 11px;
+  padding: 0 2px; border-radius: 6px; background: var(--color-accent); color: var(--color-accent_text);
+  font-size: 8px; line-height: 11px; text-align: center; font-weight: 700; }
+#${NOTE_MARKERS_ID} .knm-imgs { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+#${NOTE_MARKERS_ID} .knm-img { width: 118px; height: auto; border-radius: 3px; cursor: zoom-in;
+  border: 1px solid var(--color-border); }
+#${NOTE_MARKERS_ID} .knm-img:hover { border-color: var(--color-accent); }
+#${NOTE_MARKERS_ID} .knm-pending { margin-top: 3px; font-size: 9.5px; opacity: .55; }
+#${NOTE_MARKERS_ID} .knm-tip { display: none; position: fixed; z-index: 60; opacity: 1;
+  width: 260px; padding: 7px 9px; border-radius: 4px; background: var(--color-ui);
+  border: 1px solid var(--color-border); box-shadow: 0 4px 14px rgba(0,0,0,.45);
+  color: var(--color-text); font-size: 11px; line-height: 1.45; white-space: normal;
+  text-align: left; cursor: default; }
+#${NOTE_MARKERS_ID} .knm:hover .knm-tip { display: block; }
+#${NOTE_MARKERS_ID} .knm-head { display: flex; justify-content: space-between; gap: 8px;
+  font-variant-numeric: tabular-nums; font-weight: 600; margin-bottom: 4px; }
+#${NOTE_MARKERS_ID} .knm-head span { font-weight: 400; opacity: .65; }
+#${NOTE_MARKERS_ID} .knm-note { padding: 4px 0; border-top: 1px solid var(--color-border); }
+#${NOTE_MARKERS_ID} .knm-who { display: flex; align-items: center; gap: 6px; font-size: 10px; }
+#${NOTE_MARKERS_ID} .knm-who span { opacity: .55; font-variant-numeric: tabular-nums; }
+#${NOTE_MARKERS_ID} .knm-st { margin-left: auto; font-size: 8.5px; text-transform: uppercase;
+  letter-spacing: .04em; padding: 0 4px; border-radius: 3px; opacity: 1; }
+#${NOTE_MARKERS_ID} .knm-st.op { background: rgba(208,82,82,.16); color: #e78b8b; }
+#${NOTE_MARKERS_ID} .knm-st.ok { background: rgba(90,164,105,.16); color: #79c98a; }
+#${NOTE_MARKERS_ID} .knm-text { margin-top: 2px; white-space: pre-wrap; word-break: break-word; }
+#${NOTE_MARKERS_ID} .knm-foot { margin-top: 5px; font-size: 9.5px; opacity: .55; }
+`;
+  function nextMarker(markers, time, dir) {
+    if (!markers.length) return null;
+    const eps = 1e-4;
+    const sorted = [...markers].sort((a, b) => a.time - b.time);
+    if (dir > 0) return sorted.find((m) => m.time > time + eps) ?? sorted[0];
+    return [...sorted].reverse().find((m) => m.time < time - eps) ?? sorted[sorted.length - 1];
+  }
+  var hooks = null;
+  var installed = false;
+  var unwatchers = [];
+  var current2 = [];
+  var navActions = [];
+  function visibleMarkers() {
+    return visible ? current2 : [];
+  }
+  function jumpRelative(dir) {
+    const m = nextMarker(visibleMarkers(), Number(Timeline?.time) || 0, dir);
+    if (!m || !hooks) return false;
+    hooks.jump(m.notes[0].commentId);
+    return true;
+  }
+  function openNoteChecklist() {
+    if (!hooks || !currentClip) return;
+    openNoteList(visibleMarkers(), currentClip, { jump: hooks.jump, resolve: hooks.resolve, remove: hooks.remove });
+  }
+  var currentClip = null;
+  var lastHtml = "";
+  var visible = true;
+  var toggle = null;
+  var withResolved = true;
+  var resolvedToggle = null;
+  var currentThreads = null;
+  var currentShots = {};
+  function notesVisible() {
+    return visible;
+  }
+  function resolvedVisible() {
+    return withResolved;
+  }
+  function setNotesVisible(v) {
+    visible = v;
+    try {
+      if (toggle && !!toggle.value !== v) toggle.set(v);
+    } catch {
+    }
+    reposition();
+    hooks?.changed?.();
+  }
+  function setResolvedVisible(v) {
+    withResolved = v;
+    try {
+      if (resolvedToggle && !!resolvedToggle.value !== v) resolvedToggle.set(v);
+    } catch {
+    }
+    regroup();
+    hooks?.changed?.();
+  }
+  function pinnable(threads, showResolved) {
+    return showResolved ? threads : threads.filter((t) => t.status === "open");
+  }
+  function installNoteMarkers(h) {
+    uninstallNoteMarkers();
+    installed = true;
+    hooks = h;
+    visible = true;
+    try {
+      unwatchers = ["size", "scroll_left", "head_width", "length"].map((k) => Timeline?.vue?.$watch?.(k, () => reposition())).filter((f) => typeof f === "function");
+    } catch {
+      unwatchers = [];
+    }
+    try {
+      toggle = new Toggle("kumonga_timeline_notes", {
+        name: "Review notes",
+        description: "Show Kumonga review notes on the timeline",
+        icon: "mode_comment",
+        category: "animation",
+        condition: { modes: ["animate"] },
+        default: true,
+        onChange(value) {
+          visible = !!value;
+          reposition();
+          hooks?.changed?.();
+        }
+      });
+      if (!toggle.value) toggle.set(true);
+      Toolbars?.timeline?.add?.(toggle);
+    } catch {
+      toggle = null;
+    }
+    try {
+      resolvedToggle = new Toggle("kumonga_timeline_resolved", {
+        name: "Resolved notes",
+        description: "Show resolved review notes on the timeline as well as open ones",
+        icon: "task_alt",
+        category: "animation",
+        condition: { modes: ["animate"] },
+        default: true,
+        onChange(value) {
+          withResolved = !!value;
+          regroup();
+          hooks?.changed?.();
+        }
+      });
+      if (!resolvedToggle.value) resolvedToggle.set(true);
+      Toolbars?.timeline?.add?.(resolvedToggle);
+    } catch {
+      resolvedToggle = null;
+    }
+    try {
+      navActions = [
+        new Action("kumonga_next_note", {
+          name: "Next review note",
+          description: "Seek to the next Kumonga note on this clip",
+          icon: "navigate_next",
+          category: "animation",
+          condition: { modes: ["animate"] },
+          keybind: new Keybind({ key: 221, alt: true }),
+          click: () => {
+            jumpRelative(1);
+          }
+        }),
+        new Action("kumonga_prev_note", {
+          name: "Previous review note",
+          description: "Seek to the previous Kumonga note on this clip",
+          icon: "navigate_before",
+          category: "animation",
+          condition: { modes: ["animate"] },
+          keybind: new Keybind({ key: 219, alt: true }),
+          click: () => {
+            jumpRelative(-1);
+          }
+        })
+      ];
+    } catch {
+      navActions = [];
+    }
+  }
+  function uninstallNoteMarkers() {
+    installed = false;
+    for (const a of navActions) {
+      try {
+        a.delete?.();
+      } catch {
+      }
+    }
+    navActions = [];
+    for (const u of unwatchers) {
+      try {
+        u();
+      } catch {
+      }
+    }
+    unwatchers = [];
+    document.getElementById(NOTE_LANE_ID)?.remove();
+    try {
+      Toolbars?.timeline?.remove?.(toggle);
+    } catch {
+    }
+    try {
+      toggle?.delete?.();
+    } catch {
+    }
+    toggle = null;
+    try {
+      Toolbars?.timeline?.remove?.(resolvedToggle);
+    } catch {
+    }
+    try {
+      resolvedToggle?.delete?.();
+    } catch {
+    }
+    resolvedToggle = null;
+    currentThreads = null;
+    currentShots = {};
+    document.getElementById(NOTE_MARKERS_ID)?.remove();
+    hooks = null;
+    current2 = [];
+    currentClip = null;
+    lastHtml = "";
+  }
+  function updateNoteMarkers(threads, clip, shots2 = {}) {
+    currentThreads = threads;
+    currentShots = shots2;
+    currentClip = clip;
+    regroup();
+  }
+  function regroup() {
+    current2 = currentThreads && currentClip ? noteMarkers(pinnable(currentThreads, withResolved), currentClip, currentShots) : [];
+    reposition();
+  }
+  function reposition() {
+    if (!installed) return;
+    const panel = document.getElementById("panel_timeline");
+    let lane = document.getElementById(NOTE_LANE_ID);
+    if (!panel) {
+      lane?.remove();
+      lastHtml = "";
+      return;
+    }
+    if (!lane || lane.parentElement !== panel) {
+      lane?.remove();
+      lane = document.createElement("div");
+      lane.id = NOTE_LANE_ID;
+      lane.innerHTML = `<div class="knl-head" title="Review notes on the selected clip"><i class="material-icons">mode_comment</i>Notes</div><div class="knl-track"><div id="${NOTE_MARKERS_ID}"></div></div>`;
+      lane.addEventListener("mousedown", onDown);
+      lane.addEventListener("click", onClick);
+      lane.addEventListener("mouseover", onHover);
+      const vueRoot = panel.querySelector(":scope > .panel_vue_wrapper") ?? document.getElementById("timeline_vue")?.parentElement ?? null;
+      if (vueRoot && vueRoot.parentElement === panel) panel.insertBefore(lane, vueRoot);
+      else panel.appendChild(lane);
+      lastHtml = "";
+    }
+    const data = Timeline?.vue?._data ?? {};
+    const size = Number(data.size) || 0;
+    const show2 = visible && size > 0 && current2.length > 0;
+    lane.classList.toggle("on", show2);
+    const host2 = lane.querySelector(`#${NOTE_MARKERS_ID}`);
+    const head = lane.querySelector(".knl-head");
+    if (!host2 || !head) return;
+    if (!show2) {
+      host2.innerHTML = "";
+      lastHtml = "";
+      lastDrawn = null;
+      return;
+    }
+    head.style.width = `${Number(data.head_width) || 144}px`;
+    host2.style.left = `${8 - (Number(data.scroll_left) || 0)}px`;
+    host2.style.width = `${size * (Number(data.length) || 0)}px`;
+    if (lastDrawn && lastDrawn.markers === current2 && lastDrawn.size === size) return;
+    const html = renderNoteMarkers(current2, size);
+    lastDrawn = { markers: current2, size };
+    if (html !== lastHtml) {
+      host2.innerHTML = html;
+      lastHtml = html;
+    }
+  }
+  var lastDrawn = null;
+  function onHover(e) {
+    const pin = e.target?.closest?.(".knm");
+    const tip = pin?.querySelector(".knm-tip");
+    if (!pin || !tip) return;
+    const r = pin.getBoundingClientRect();
+    tip.style.left = `${Math.max(4, Math.min(r.left - 8, window.innerWidth - 272))}px`;
+    tip.style.top = `${r.bottom + 2}px`;
+  }
+  function onDown(e) {
+    e.stopPropagation();
+  }
+  function onClick(e) {
+    const target = e.target;
+    const pin = target?.closest?.(".knm");
+    if (!pin || !hooks) return;
+    e.stopPropagation();
+    const wantsView = e.shiftKey || !!target?.closest?.(".knm-img");
+    if (wantsView) {
+      const m = current2.find((x) => x.frame === Number(pin.dataset.frame));
+      if (m) openNoteView(m, currentClip ?? "", { jump: hooks.jump, resolve: hooks.resolve, remove: hooks.remove });
+      return;
+    }
+    const id = pin.dataset.comment;
+    if (id) hooks.jump(id);
+  }
+
+  // src/ui/animlist.ts
+  var decorOf = (item, legend) => ({
+    status: statusOf(item, legend),
+    mark: markClass(item, legend),
+    priority: item.priority
+  });
+  function animationRows(task2, clips) {
+    const items = task2.checklist ?? [];
+    const report = assessClips(items.map((i) => i.name), clips);
+    const present = {};
+    const names = {};
+    const missing = [];
+    for (const item of items) {
+      const decor = decorOf(item, task2.checklistFormat);
+      if (report.states[item.name] === "present") {
+        present[normaliseClip(item.name)] = decor;
+        names[normaliseClip(item.name)] = item.name;
+      } else missing.push({ ...decor, name: item.name, index: item.index });
+    }
+    return { present, items: names, extra: report.extra, missing };
+  }
+  function openNotesFor(rows, clipName, counts) {
+    if (!counts) return null;
+    const id = rows.items[normaliseClip(clipName)] ?? clipName;
+    return counts[targetKey({ kind: "clip", id })] ?? 0;
+  }
+  function decorFor(rows, clipName) {
+    return rows.present[normaliseClip(clipName)] ?? "extra";
+  }
+  function renderRowChips(decor, notes = null, resolved = null) {
+    const count = (notes ? `<span class="kal-notes" title="${notes} open note${notes === 1 ? "" : "s"} on this animation">${notes}</span>` : "") + (resolved ? `<span class="kal-notes ok" title="${resolved} resolved note${resolved === 1 ? "" : "s"} on this animation">&#10003;${resolved}</span>` : "");
+    if (decor === "extra") {
+      return '<span class="kal">' + count + '<span class="kal-tag" title="No checklist item asks for this animation">Not in list</span></span>';
+    }
+    return '<span class="kal">' + count + (decor.priority ? priorityGlyph(decor.priority) : '<span class="ipri kal-nopri"></span>') + `<span class="kal-st ${esc(decor.mark)}" title="Checklist state: ${esc(decor.status)}">${esc(decor.status)}</span></span>`;
+  }
+  function renderGhostRow(row) {
+    return `<li class="animation kal-ghost" data-name="${esc(row.name)}" title="On the checklist, not in this file yet"><i class="material-icons">movie</i><label>${esc(row.name)}</label>` + renderRowChips(row) + `<div class="in_list_button kal-add" data-name="${esc(row.name)}" title="Create the animation &quot;${esc(row.name)}&quot;"><i class="material-icons">add</i></div><div class="in_list_button kal-blank"></div></li>`;
+  }
+  var ANIM_LIST_CSS = `
+#animations_list .kal { display: inline-flex; align-items: center; gap: 5px; margin: 0 6px 0 4px;
+  flex: none; font-size: 9px; line-height: 1; }
+#animations_list .kal-st { padding: 2px 6px; border-radius: 3px; border: 1px solid var(--color-border);
+  text-transform: uppercase; letter-spacing: .04em; font-weight: 600; color: var(--color-text);
+  white-space: nowrap; }
+#animations_list .kal-st.m-todo { opacity: .7; }
+#animations_list .kal-st.m-doing { color: #6fb2e8; border-color: #2f5c80; }
+#animations_list .kal-st.m-done { color: #79c98a; border-color: #33603d; }
+#animations_list .kal-st.m-skip { opacity: .45; text-decoration: line-through; }
+#animations_list .kal-st.m-chg { color: #e8b862; border-color: #6b5423; }
+#animations_list .kal-st.m-qa { color: #c0a4e8; border-color: #553f70; }
+#animations_list .kal-notes { min-width: 14px; padding: 1px 5px; border-radius: 8px; text-align: center;
+  background: rgba(208,82,82,.18); color: #e78b8b; font-weight: 700; font-variant-numeric: tabular-nums; }
+#animations_list .kal-notes.ok { background: rgba(90,164,105,.16); color: #79c98a; }
+#animations_list .kal-tag { padding: 2px 6px; border-radius: 3px; text-transform: uppercase;
+  letter-spacing: .04em; font-weight: 600; background: rgba(224,160,48,.16); color: #e0a030;
+  white-space: nowrap; }
+#animations_list .ipri { display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 14px; border-radius: 3px; font-weight: 600;
+  background: var(--color-border); color: var(--color-text); }
+#animations_list .ipri.kal-nopri { background: transparent; }
+#animations_list .ipri:not(:has(svg)) { width: auto; padding: 1px 6px; font-size: 8px;
+  text-transform: uppercase; letter-spacing: .04em; }
+#animations_list .ipri svg { width: 10px; height: 10px; fill: none; stroke: currentColor;
+  stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+#animations_list .ipri.p-high { background: rgba(208,82,82,.18); color: #e78b8b; }
+#animations_list .ipri.p-med { background: rgba(224,160,48,.18); color: #e8b862; }
+#animations_list .ipri.p-low { background: rgba(90,140,200,.16); color: #8fb6dd; }
+#animations_list .kal-ghost { opacity: .5; cursor: default; }
+#animations_list .kal-ghost:hover { opacity: .85; background: none; }
+#animations_list .kal-ghost > label { font-style: italic; }
+#animations_list .kal-ghost .kal-add { opacity: 1; cursor: pointer; color: var(--color-accent); }
+#animations_list .kal-ghost .kal-add:hover { color: var(--color-light); }
+#animations_list .kal-ghost .kal-blank { pointer-events: none; }
+`;
+  var task = null;
+  var openNotes = null;
+  var resolvedNotes = null;
+  var installed2 = false;
+  var last = { at: 0, rows: 0, matched: 0, missing: [], ghosts: 0, host: "", error: "" };
+  var observer = null;
+  var watched = null;
+  var applying = false;
+  var queued = false;
+  var EVENTS = [
+    "select_animation",
+    "remove_animation",
+    "edit_animation_properties",
+    "select_project",
+    "load_project",
+    "select_mode",
+    "add_animation"
+  ];
+  function installAnimationList() {
+    uninstallAnimationList();
+    installed2 = true;
+    for (const name of EVENTS) {
+      try {
+        Blockbench.on?.(name, schedule);
+      } catch {
+      }
+    }
+  }
+  function uninstallAnimationList() {
+    installed2 = false;
+    for (const name of EVENTS) {
+      try {
+        Blockbench.removeListener?.(name, schedule);
+      } catch {
+      }
+    }
+    observer?.disconnect();
+    observer = null;
+    watched?.removeEventListener("mousedown", onDown2, true);
+    watched?.removeEventListener("click", onClick2, true);
+    watched = null;
+    task = null;
+    clear(document.getElementById("animations_list"));
+  }
+  function updateAnimationList(t, counts = null, resolved = null) {
+    task = t;
+    openNotes = counts;
+    resolvedNotes = resolved;
+    apply();
+  }
+  function schedule() {
+    if (queued || !installed2) return;
+    queued = true;
+    requestAnimationFrame(() => {
+      queued = false;
+      apply();
+    });
+  }
+  function clear(list) {
+    if (!list) return;
+    list.querySelectorAll(".kal, .kal-ghost").forEach((el) => el.remove());
+  }
+  function apply() {
+    if (!installed2) return;
+    const list = document.getElementById("animations_list");
+    if (!list) return;
+    if (!observer || watched !== list) {
+      observer?.disconnect();
+      watched?.removeEventListener("mousedown", onDown2, true);
+      watched?.removeEventListener("click", onClick2, true);
+      watch(list);
+    }
+    if (applying) return;
+    applying = true;
+    try {
+      clear(list);
+      if (!task?.checklist?.length) return;
+      const anims = animationsInProject();
+      const rows = animationRows(task, anims.map((a) => a.name));
+      const byUuid = new Map(anims.map((a) => [a.uuid, a.name]));
+      const lis = Array.from(list.querySelectorAll("li.animation[anim_id]"));
+      last = { at: Date.now(), rows: lis.length, matched: 0, missing: rows.missing.map((m) => m.name), ghosts: 0, host: "", error: "" };
+      let host2 = null;
+      for (const li of lis) {
+        const name = byUuid.get(li.getAttribute("anim_id") ?? "");
+        if (!name) continue;
+        last.matched++;
+        host2 = host2 ?? li.parentElement;
+        const chips = document.createElement("span");
+        chips.innerHTML = renderRowChips(decorFor(rows, name), openNotesFor(rows, name, openNotes), openNotesFor(rows, name, resolvedNotes));
+        const first = li.querySelector(".in_list_button");
+        li.insertBefore(chips.firstElementChild, first);
+      }
+      if (!rows.missing.length) return;
+      host2 = host2 ?? list.querySelector("li.animation_file > ul") ?? list;
+      last.host = host2 === list ? "#animations_list" : `${host2.tagName.toLowerCase()}.${host2.className}`;
+      const frag = document.createElement("template");
+      frag.innerHTML = rows.missing.map(renderGhostRow).join("");
+      host2.appendChild(frag.content);
+      last.ghosts = list.querySelectorAll(".kal-ghost").length;
+    } catch (e) {
+      last.error = String(e?.message || e);
+      trace(`animation list: ${e?.message || e}`);
+    } finally {
+      observer?.takeRecords();
+      applying = false;
+    }
+  }
+  function animationListDiagnosis() {
+    const list = document.getElementById("animations_list");
+    const lines = [
+      task ? `Animations panel mirrors ${task.key} (${task.checklist?.length ?? 0} checklist items).` : "Animations panel has no task to mirror \u2014 not an Animation task, or none known.",
+      !list ? "The list element (#animations_list) is not in the page." : `The list has ${list.querySelectorAll("li.animation[anim_id]").length} animation rows, ${list.querySelectorAll(".kal").length} chips and ${list.querySelectorAll(".kal-ghost").length} ghost rows right now.`
+    ];
+    if (last.at) {
+      lines.push(`Last pass ${Math.round((Date.now() - last.at) / 1e3)}s ago: ${last.rows} rows seen, ${last.matched} matched to the project's animations; ` + (last.missing.length ? `missing: ${last.missing.join(", ")}; ` : "nothing missing; ") + (last.host ? `ghosts appended to ${last.host} (${last.ghosts} present after).` : "no ghosts appended."));
+    } else lines.push("No pass has run yet.");
+    if (last.error) lines.push(`Last error: ${last.error}`);
+    lines.push(`Observer ${observer ? "attached" : "not attached"}${watched ? watched === list ? " to this list" : " to a stale list" : ""}.`);
+    return lines.join("\n");
+  }
+  function watch(list) {
+    observer = new MutationObserver(() => {
+      if (!applying) schedule();
+    });
+    observer.observe(list, { childList: true, subtree: true });
+    list.addEventListener("mousedown", onDown2, true);
+    list.addEventListener("click", onClick2, true);
+    watched = list;
+  }
+  function onDown2(e) {
+    if (e.target?.closest?.(".kal-ghost")) e.stopPropagation();
+  }
+  function onClick2(e) {
+    const target = e.target;
+    const add = target?.closest?.(".kal-add");
+    if (add) {
+      e.stopPropagation();
+      e.preventDefault();
+      const name = add.dataset.name;
+      if (name && !createAnimation(name)) trace(`animation list: could not create "${name}"`);
+      schedule();
+      return;
+    }
+    if (target?.closest?.(".kal-ghost")) e.stopPropagation();
+  }
+
+  // src/ui/reviewbar.ts
+  var REVIEW_BAR_ID = "kumonga_review_bar";
+  function reviewBarModel(ctx, live, notesShown = true, resolvedShown = true, pins = 0) {
+    if (!ctx || !live || !ctx.lead || !live.clip) return null;
+    const task2 = ctx.task;
+    const want = normaliseClip(live.clip);
+    const item = (task2.checklist ?? []).find((i) => normaliseClip(i.name) === want) ?? null;
+    const clipQa = !!item && isQa(statusOf(item, task2.checklistFormat));
+    const taskQa = /^(in )?qa$/i.test(task2.status);
+    if (!clipQa && !taskQa) return null;
+    return {
+      taskKey: task2.key,
+      clip: live.clip,
+      status: clipQa ? statusOf(item, task2.checklistFormat) : task2.status,
+      notes: ctx.openNotes ? ctx.openNotes[targetKey({ kind: "clip", id: live.clip })] ?? 0 : null,
+      pin: live.pin,
+      playing: live.playing,
+      speed: live.speed,
+      looping: live.looping,
+      onion: live.onion,
+      ghost: live.ghost,
+      notesShown,
+      resolvedShown,
+      pins
+    };
+  }
+  var icon = (name) => `<i class="material-icons">${name}</i>`;
+  function renderReviewBar(m) {
+    const speed = (pct) => `<button class="krb-b krb-sp${m.speed === pct ? " on" : ""}" data-act="rb-speed" data-speed="${pct}" title="Play at ${pct}%">${pct}%</button>`;
+    const sep = '<span class="krb-sep"></span>';
+    return `<span class="krb-tag"><span class="krb-eyebrow">Review</span><span class="krb-key">${esc(m.taskKey)}</span><b class="krb-clip" title="The selected animation">${esc(m.clip)}</b><span class="krb-status" title="Its state on the checklist">${esc(m.status)}</span></span>` + sep + `<span class="krb-group"><button class="krb-b krb-ico" data-act="rb-back" title="Previous frame">${icon("skip_previous")}</button><button class="krb-b krb-ico" data-act="rb-play" title="${m.playing ? "Pause" : "Play"}">` + icon(m.playing ? "pause" : "play_arrow") + `</button><button class="krb-b krb-ico" data-act="rb-forth" title="Next frame">${icon("skip_next")}</button><span class="krb-frame" title="Playhead: frame and seconds">${m.pin ? esc(formatPin(m.pin)) : ""}</span></span>` + sep + '<span class="krb-group krb-speeds" title="Playback speed">' + speed(25) + speed(50) + speed(100) + "</span>" + sep + `<span class="krb-group"><button class="krb-b${m.looping ? " on" : ""}" data-act="rb-loop" title="${m.looping ? "Clear the loop range" : "Loop six frames either side of the playhead"}">${icon("repeat")}<span class="krb-lbl">Loop</span></button><button class="krb-b${m.onion ? " on" : ""}" data-act="rb-onion" title="Blockbench's onion skin">${icon("layers")}<span class="krb-lbl">Onion</span></button><button class="krb-b${m.notesShown ? " on" : ""}" data-act="rb-notesvis" title="${m.notesShown ? "Hide the note pins on the ruler" : "Show the note pins on the ruler"}">${icon("mode_comment")}<span class="krb-lbl">Notes</span></button>` + (m.notesShown ? `<button class="krb-b${m.resolvedShown ? " on" : ""}" data-act="rb-resolvedvis" title="${m.resolvedShown ? "Hide resolved notes \u2014 only what is still open" : "Show resolved notes as well"}">${icon("task_alt")}<span class="krb-lbl">Resolved</span></button>` : "") + (m.ghost ? `<button class="krb-b on" data-act="rb-ghost" title="The pose at ${esc(formatPin(m.ghost))} is ghosted \u2014 click to clear">${icon("person_outline")}<span class="krb-lbl">Ghost ${esc(formatPin(m.ghost))}</span>${icon("close")}</button>` : "") + '</span><span class="krb-spring"></span><span class="krb-group krb-right">' + (m.pins > 0 ? `<button class="krb-b krb-ico" data-act="rb-prevnote" title="Previous note (Alt+[)">${icon("navigate_before")}</button>` : "") + (m.notes !== null && m.notes > 0 ? `<button class="krb-notes" data-act="rb-notelist" title="Every note on this clip \u2014 the review checklist">${icon("chat_bubble_outline")}${m.notes} open note${m.notes === 1 ? "" : "s"}</button>` : m.pins > 0 ? `<button class="krb-notes ok" data-act="rb-notelist" title="Every note on this clip \u2014 the review checklist">${icon("task_alt")}all resolved</button>` : "") + (m.pins > 0 ? `<button class="krb-b krb-ico" data-act="rb-nextnote" title="Next note (Alt+])">${icon("navigate_next")}</button>` : "") + `<button class="krb-b krb-note" data-act="rb-note" data-key="${esc(m.taskKey)}" data-clip="${esc(m.clip)}" title="Leave a note pinned to this frame, with a screenshot">${icon("rate_review")}<span class="krb-lbl">Note here</span></button></span>`;
+  }
+  var REVIEW_BAR_CSS = `
+#${REVIEW_BAR_ID} {
+  display: none; align-items: center; flex-wrap: wrap; gap: 3px 6px; flex: none;
+  min-height: 28px; padding: 3px 8px; box-sizing: border-box;
+  font-size: 11px; line-height: 1; white-space: nowrap;
+  background: var(--color-back); border-bottom: 1px solid var(--color-border);
+  color: var(--color-text); user-select: none;
+  container-type: inline-size;
+}
+/* Narrow panels: labels go first (every button keeps its tooltip), then the
+   task key and the state pill, then the dividers \u2014 the bar wraps into a
+   second row only once it is down to icons. Nothing is ever clipped. */
+@container (max-width: 820px) {
+  #${REVIEW_BAR_ID} .krb-lbl { display: none; }
+  #${REVIEW_BAR_ID} .krb-b { padding: 0 5px; }
+  #${REVIEW_BAR_ID} .krb-note { padding: 0 6px; }
+  #${REVIEW_BAR_ID} .krb-key { display: none; }
+}
+@container (max-width: 600px) {
+  #${REVIEW_BAR_ID} .krb-status, #${REVIEW_BAR_ID} .krb-sep { display: none; }
+  #${REVIEW_BAR_ID} .krb-frame { min-width: 0; }
+  #${REVIEW_BAR_ID} .krb-eyebrow { display: none; }
+}
+#${REVIEW_BAR_ID}.on { display: flex; }
+#${REVIEW_BAR_ID} > * { flex: none; }
+#${REVIEW_BAR_ID} .krb-group { display: inline-flex; align-items: center; gap: 3px; }
+#${REVIEW_BAR_ID} .krb-sep { width: 1px; height: 16px; background: var(--color-border); margin: 0 2px; }
+#${REVIEW_BAR_ID} .krb-spring { flex: 1 1 0; min-width: 0; }
+#${REVIEW_BAR_ID} .krb-right { margin-left: auto; gap: 4px; }
+
+#${REVIEW_BAR_ID} .krb-tag { display: inline-flex; align-items: center; gap: 7px; }
+#${REVIEW_BAR_ID} .krb-eyebrow { font-size: 9px; font-weight: 700; letter-spacing: .08em;
+  text-transform: uppercase; padding: 2px 5px; border-radius: 3px;
+  background: var(--color-accent); color: var(--color-accent_text); }
+#${REVIEW_BAR_ID} .krb-key { font-size: 10px; opacity: .6; font-variant-numeric: tabular-nums; }
+#${REVIEW_BAR_ID} .krb-clip { font-weight: 600; font-size: 11.5px; }
+#${REVIEW_BAR_ID} .krb-status { font-size: 9px; text-transform: uppercase; letter-spacing: .05em;
+  padding: 1px 5px; border-radius: 3px; background: rgba(224,160,48,.18); color: #e0a030; }
+
+#${REVIEW_BAR_ID} .krb-b { all: unset; box-sizing: border-box; display: inline-flex; align-items: center;
+  justify-content: center; gap: 4px; height: 22px; min-width: 22px; padding: 0 7px; margin: 0;
+  border-radius: 3px; border: 1px solid transparent; background: var(--color-button);
+  color: var(--color-text); cursor: pointer; font: inherit; font-size: 10.5px; line-height: 1;
+  white-space: nowrap; }
+#${REVIEW_BAR_ID} .krb-b:hover { background: var(--color-selected); }
+#${REVIEW_BAR_ID} .krb-b:focus-visible { border-color: var(--color-accent); }
+#${REVIEW_BAR_ID} .krb-b.on { background: var(--color-accent); color: var(--color-accent_text); }
+#${REVIEW_BAR_ID} .krb-b .material-icons { font-size: 15px; line-height: 1; width: 15px; }
+#${REVIEW_BAR_ID} .krb-ico { padding: 0 4px; }
+#${REVIEW_BAR_ID} .krb-frame { min-width: 80px; padding: 0 4px; text-align: center;
+  font-variant-numeric: tabular-nums; font-size: 11px; opacity: .85; }
+
+#${REVIEW_BAR_ID} .krb-speeds { gap: 0; border-radius: 3px; overflow: hidden;
+  border: 1px solid var(--color-border); }
+#${REVIEW_BAR_ID} .krb-sp { border-radius: 0; height: 20px; padding: 0 7px; font-size: 10px;
+  font-variant-numeric: tabular-nums; }
+#${REVIEW_BAR_ID} .krb-sp + .krb-sp { border-left: 1px solid var(--color-border); }
+
+#${REVIEW_BAR_ID} .krb-notes { all: unset; box-sizing: border-box; display: inline-flex; align-items: center; gap: 4px;
+  font: inherit; font-size: 10px; padding: 0 7px; height: 20px; border-radius: 10px; cursor: pointer;
+  background: rgba(208,82,82,.16); color: #e78b8b; white-space: nowrap; }
+#${REVIEW_BAR_ID} .krb-notes:hover { filter: brightness(1.2); }
+#${REVIEW_BAR_ID} .krb-notes.ok { background: rgba(90,164,105,.16); color: #79c98a; }
+#${REVIEW_BAR_ID} .krb-notes .material-icons { font-size: 13px; }
+#${REVIEW_BAR_ID} .krb-note { background: var(--color-accent); color: var(--color-accent_text);
+  font-weight: 600; padding: 0 9px; }
+#${REVIEW_BAR_ID} .krb-note:hover { filter: brightness(1.12); background: var(--color-accent); }
+`;
+  var hooks2 = null;
+  var lastHtml2 = "";
+  var frameTimer = null;
+  var EVENTS2 = [
+    "select_animation",
+    "select_project",
+    "load_project",
+    "select_mode",
+    "timeline_play",
+    "timeline_pause",
+    "update_selection"
+  ];
+  function installReviewBar(h) {
+    uninstallReviewBar();
+    hooks2 = h;
+    for (const name of EVENTS2) {
+      try {
+        Blockbench.on?.(name, onEvent);
+      } catch {
+      }
+    }
+    try {
+      Blockbench.on?.("display_animation_frame", onFrame);
+    } catch {
+    }
+    installNoteMarkers({
+      jump: (commentId) => {
+        const task2 = hooks2?.context()?.task;
+        if (task2) hooks2?.onJump(task2.key, commentId);
+      },
+      resolve: (commentId, status) => {
+        const task2 = hooks2?.context()?.task;
+        return task2 && hooks2 ? hooks2.onResolve(task2.key, commentId, status) : Promise.resolve();
+      },
+      remove: (commentId) => {
+        const task2 = hooks2?.context()?.task;
+        return task2 && hooks2 ? hooks2.onDelete(task2.key, commentId) : Promise.resolve(false);
+      },
+      changed: () => updateReviewBar()
+    });
+    installAnimationList();
+    updateReviewBar();
+  }
+  function uninstallReviewBar() {
+    for (const name of EVENTS2) {
+      try {
+        Blockbench.removeListener?.(name, onEvent);
+      } catch {
+      }
+    }
+    try {
+      Blockbench.removeListener?.("display_animation_frame", onFrame);
+    } catch {
+    }
+    if (frameTimer) {
+      clearTimeout(frameTimer);
+      frameTimer = null;
+    }
+    uninstallNoteMarkers();
+    uninstallAnimationList();
+    document.getElementById(REVIEW_BAR_ID)?.remove();
+    hooks2 = null;
+    lastHtml2 = "";
+  }
+  function onEvent() {
+    updateReviewBar();
+  }
+  function onFrame() {
+    if (frameTimer) return;
+    frameTimer = setTimeout(() => {
+      frameTimer = null;
+      const bar = document.getElementById(REVIEW_BAR_ID);
+      if (!bar || !bar.classList.contains("on")) return;
+      const live = timelineLive();
+      const readout = bar.querySelector(".krb-frame");
+      if (readout && live?.pin) readout.textContent = formatPin(live.pin);
+    }, 120);
+  }
+  function updateReviewBar() {
+    if (!hooks2) return;
+    let model = null;
+    try {
+      const ctx = hooks2.context();
+      const live = timelineLive();
+      updateNoteMarkers(ctx?.threads ?? null, live?.clip ?? null, ctx?.shots ?? {});
+      model = reviewBarModel(ctx, live, notesVisible(), resolvedVisible(), visibleMarkers().length);
+      updateAnimationList(ctx?.clipsTask ? ctx.task : null, ctx?.openNotes ?? null, ctx?.resolvedNotes ?? null);
+    } catch (e) {
+      trace(`review bar: ${e?.message || e}`);
+    }
+    const bar = ensureBar();
+    if (!bar) return;
+    if (!model) {
+      bar.classList.remove("on");
+      lastHtml2 = "";
+      return;
+    }
+    const html = renderReviewBar(model);
+    if (html !== lastHtml2) {
+      bar.innerHTML = html;
+      lastHtml2 = html;
+    }
+    bar.classList.add("on");
+  }
+  function reviewBarDiagnosis(project) {
+    const lines = [];
+    const live = timelineLive();
+    if (!live) return "Blockbench's Timeline or Animation objects are not there \u2014 is this the desktop app in Animate mode?";
+    if (!project) lines.push("No project is open in Blockbench.");
+    else if (!project.jiraKey) lines.push(`The open project "${project.name}" carries no Jira task key. Link it to the task (Link open file) so it is stamped and saved.`);
+    else lines.push(`Open project "${project.name}" is stamped ${project.jiraKey}.`);
+    const ctx = hooks2 ? hooks2.context() : null;
+    if (!hooks2) lines.push("The bar is not installed \u2014 the plugin did not finish loading.");
+    else if (project?.jiraKey && !ctx) lines.push(`Kumonga has not loaded ${project.jiraKey} in any list yet. Open the task's tab (My work, QA, Overview) so it is known.`);
+    if (ctx) {
+      lines.push(ctx.lead ? `You lead "${ctx.task.component}", so you may review it.` : `You do not lead "${ctx.task.component ?? "(no component)"}" \u2014 the bar is for the component lead.`);
+      const clip = live.clip;
+      if (!clip) lines.push("No animation is selected in Blockbench.");
+      else {
+        const item = (ctx.task.checklist ?? []).find((i) => normaliseClip(i.name) === normaliseClip(clip));
+        lines.push(item ? `Selected clip "${clip}" is ${statusOf(item, ctx.task.checklistFormat)} on the checklist; the task is ${ctx.task.status}.` : `Selected clip "${clip}" is not on the checklist; the task is ${ctx.task.status}.`);
+      }
+      lines.push(reviewBarModel(ctx, live) ? "Every condition holds \u2014 the bar should be showing." : "So the bar stays hidden.");
+      const threads = ctx.threads;
+      if (!threads) lines.push("Feedback for this task has not been fetched yet (or the fetch failed \u2014 see the load report).");
+      else {
+        const want = live.clip ? targetKey({ kind: "clip", id: live.clip }) : null;
+        const clipNotes = threads.filter((t) => t.target?.kind === "clip");
+        lines.push(`${threads.length} comment${threads.length === 1 ? "" : "s"} on the task, ${clipNotes.length} of them clip notes${want ? `; pins are drawn for ${want}` : ""}:`);
+        for (const t of clipNotes) {
+          const key = targetKey(t.target);
+          const why = !t.at ? "NO FRAME \u2014 was left without the clip on screen, so it cannot be pinned" : want && key !== want ? `other clip (${key})` : notesVisible() ? "pinned" : "pinned, but pins are hidden";
+          lines.push(`  #${t.commentId} "${t.target.id}" ${t.status}${t.at ? " @ " + formatPin(t.at) : ""} \u2014 ${why}`);
+        }
+      }
+    }
+    const panel = document.getElementById("panel_timeline");
+    const bar = document.getElementById(REVIEW_BAR_ID);
+    lines.push(!panel ? "The timeline panel (#panel_timeline) is not in the page \u2014 it only exists in Animate mode." : !bar ? "The bar element has not been created yet." : `The bar element exists${bar.parentElement === panel ? " inside the timeline panel" : " but not inside the timeline panel"} and is ${bar.classList.contains("on") ? "on" : "off"}.`);
+    lines.push("", animationListDiagnosis());
+    return lines.join("\n");
+  }
+  function ensureBar() {
+    const existing = document.getElementById(REVIEW_BAR_ID);
+    const panel = document.getElementById("panel_timeline");
+    if (!panel) return existing;
+    if (existing && existing.parentElement === panel) return existing;
+    existing?.remove();
+    const bar = document.createElement("div");
+    bar.id = REVIEW_BAR_ID;
+    bar.addEventListener("click", onClick3);
+    const handle = panel.querySelector(":scope > .panel_handle");
+    if (handle?.nextSibling) panel.insertBefore(bar, handle.nextSibling);
+    else panel.prepend(bar);
+    lastHtml2 = "";
+    return bar;
+  }
+  function onClick3(e) {
+    const el = e.target?.closest?.("[data-act]");
+    if (!el) return;
+    e.stopPropagation();
+    switch (el.dataset.act) {
+      case "rb-back":
+        stepFrame(-1);
+        break;
+      case "rb-forth":
+        stepFrame(1);
+        break;
+      case "rb-play":
+        togglePlay();
+        break;
+      case "rb-speed":
+        setSpeed(Number(el.dataset.speed) || 100);
+        break;
+      case "rb-loop":
+        toggleLoopAround();
+        break;
+      case "rb-onion":
+        toggleOnionSkin();
+        break;
+      case "rb-ghost":
+        ghostAt(null);
+        break;
+      case "rb-notesvis":
+        setNotesVisible(!notesVisible());
+        break;
+      case "rb-resolvedvis":
+        setResolvedVisible(!resolvedVisible());
+        break;
+      case "rb-prevnote":
+        jumpRelative(-1);
+        break;
+      case "rb-nextnote":
+        jumpRelative(1);
+        break;
+      case "rb-notelist":
+        openNoteChecklist();
+        break;
+      case "rb-note":
+        hooks2?.onNote(el.dataset.key ?? "", el.dataset.clip ?? "");
+        break;
+    }
+    updateReviewBar();
+  }
+
+  // src/ui/quitdialog.ts
+  function repoName(root) {
+    const leaf = root.replace(/[\\/]+$/, "").split(/[\\/]/).pop() ?? root;
+    return leaf.replace(/^EGT[-_]/i, "") || leaf;
+  }
+  function describeUnpushed(r) {
+    const parts = [];
+    if (r.ahead > 0) parts.push(`${r.ahead} commit${r.ahead === 1 ? "" : "s"} not pushed`);
+    if (r.dirty) parts.push("files not committed");
+    if (r.local) parts.push("branch not on origin yet");
+    return parts.join(" \xB7 ");
+  }
+  function renderUnpushed(rows) {
+    const cards = rows.map((r, i) => {
+      const keys = r.projects.map((p) => `<span class="kq-proj" title="${esc(p.name)}">${esc(p.key)}</span>`).join("");
+      return `<div class="kq-repo" data-i="${i}"><div class="kq-head"><b class="kq-name">${esc(repoName(r.root))}</b><span class="kq-branch">${esc(r.branch)}</span>${keys}</div><div class="kq-what">${esc(describeUnpushed(r))}</div><div class="kq-root" title="${esc(r.root)}">${esc(r.root)}</div><button class="kmbtn kq-open" type="button" data-act="desktop" data-i="${i}"` + (r.remote ? "" : ' title="No remote recorded \u2014 opens the folder instead"') + `>${r.remote ? "Open in GitHub Desktop" : "Open folder"}</button></div>`;
+    }).join("");
+    return `<p class="kmtext">Until this is pushed, nobody else on the team has it, and neither does the backup.</p><div class="kq-list">${cards}</div><p class="kmnote">Kumonga does not commit or push for you \u2014 GitHub Desktop does. Commit and push there, then quit Blockbench.</p><label class="kmcheck"><input type="checkbox"><span>Quit without pushing. I know this work is only on this machine until I push it.</span></label>`;
+  }
+  var QUIT_DIALOG_CSS = `
+.kmbox.kmquit { width:min(560px, calc(100vw - 32px)); max-width:min(560px, calc(100vw - 32px)); }
+.kq-list { display:flex; flex-direction:column; gap:8px; margin:10px 0 2px; }
+.kq-repo { display:grid; grid-template-columns:1fr auto; grid-template-areas:"head open" "what open" "root open";
+  column-gap:12px; row-gap:3px; align-items:center; padding:9px 11px; border-radius:4px;
+  background:var(--color-back); border:1px solid var(--color-border); border-left:3px solid #e0a030; }
+.kq-head { grid-area:head; display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+.kq-name { font-size:12.5px; font-weight:700; }
+.kq-proj { font-size:9px; font-weight:600; letter-spacing:.04em; padding:1px 5px; border-radius:3px;
+  background:var(--color-border); color:var(--color-text); opacity:.75; }
+.kq-branch { font-family:var(--font-code, monospace); font-size:11px; opacity:.85; }
+.kq-what { grid-area:what; font-size:11.5px; font-weight:600; color:#e8b862; }
+.kq-root { grid-area:root; font-size:9.5px; opacity:.5; font-family:var(--font-code, monospace);
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; direction:rtl; text-align:left; }
+.kq-open { grid-area:open; white-space:nowrap; }
+.kmbtn.danger { background:rgba(208,82,82,.22); color:#e78b8b; }
+.kmbtn.danger:hover:not(:disabled) { background:#c94a4a; color:#fff; filter:none; }
+.kmbtn:disabled { opacity:.4; cursor:default; filter:none; }
+.kmbtn:disabled:hover { background:var(--color-button); color:var(--color-text); }
+`;
+  var title = (n) => `Work on ${n} ${n === 1 ? "repository" : "repositories"} has not been pushed`;
+  function openQuitDialog(rows, hooks3) {
+    let current3 = rows;
+    const s = shell(document, title(rows.length), ["Don't quit", "Check again", "Quit anyway"]);
+    s.overlay.querySelector(".kmbox")?.classList.add("kmquit");
+    const heading = s.overlay.querySelector(".kmtitle");
+    const [stay, again, quit] = Array.from(s.overlay.querySelectorAll(".kmfoot .kmbtn"));
+    quit.classList.remove("primary");
+    quit.classList.add("danger");
+    again.classList.add("primary");
+    let acknowledged = false;
+    const paint = () => {
+      s.body.innerHTML = renderUnpushed(current3);
+      if (heading) heading.textContent = title(current3.length);
+      const box = s.body.querySelector('input[type="checkbox"]');
+      box.checked = acknowledged;
+      quit.disabled = !acknowledged;
+      box.addEventListener("change", () => {
+        acknowledged = box.checked;
+        quit.disabled = !acknowledged;
+      });
+    };
+    paint();
+    stay.addEventListener("click", () => s.done("stay"));
+    quit.addEventListener("click", () => {
+      if (acknowledged) s.done("quit");
+    });
+    again.addEventListener("click", async () => {
+      again.disabled = true;
+      again.textContent = "Checking\u2026";
+      try {
+        const fresh = await hooks3.recheck();
+        if (!fresh.length) {
+          s.done("quit");
+          return;
+        }
+        current3 = fresh;
+        paint();
+      } finally {
+        again.disabled = false;
+        again.textContent = "Check again";
+      }
+    });
+    s.body.addEventListener("click", (e) => {
+      const b = e.target.closest('[data-act="desktop"]');
+      if (!b) return;
+      const r = current3[Number(b.dataset.i)];
+      if (r) hooks3.openDesktop(r);
+    });
+    again.focus();
+    return s.promise.then((v) => v === "quit" ? "quit" : "stay");
+  }
+
   // src/ui/note.ts
-  async function askNote(kind, subject) {
+  async function askNote(kind, subject, opts = { canShoot: false }) {
+    const where = (kind !== "clip" ? "" : opts.pin ? ` Pinned to ${opts.pin} \u2014 move the playhead first if it should be elsewhere.` + (opts.range ? ` The loop range ${opts.range} is saved with it; clear the range in Blockbench if the note is about one frame.` : "") : " Open this clip in Blockbench first to pin the note to a frame.") + (opts.canShoot ? " The camera view is saved with the note." : "");
     const answer = await chooseTextAndSelect({
       title: `Feedback on ${subject}`,
-      note: `This posts a Jira comment tagged to this ${kind}, so it reaches the artist in Jira as well as here.` + (kind === "clip" ? " The clip goes back to Needs Changes." : ""),
+      note: `This posts a Jira comment tagged to this ${kind}, so it reaches the artist in Jira as well as here.` + (kind === "clip" ? " The clip goes back to Needs Changes." : "") + where,
       textLabel: "What needs changing?",
       textValue: "",
       textPlaceholder: "The foot slides on the third step.",
       multiline: true,
-      // Not a choice yet: upload waits on M6 (D-64). Said plainly, with where to
-      // put the image meanwhile, instead of a dropdown that opens to one row.
-      selectLabel: "Screenshots",
-      options: [{ value: "none", label: "can't be attached from here yet \u2014 add them to the comment in Jira" }],
-      value: "none",
+      selectLabel: "Screenshot",
+      options: opts.canShoot ? [
+        { value: "shot", label: "attach the viewport as it is now" },
+        { value: "draw", label: "attach the viewport, after cropping or drawing on it" },
+        { value: "none", label: "none" }
+      ] : [{ value: "none", label: "none \u2014 open the model in Blockbench to attach the viewport" }],
+      value: opts.canShoot ? "shot" : "none",
       confirmLabel: "Post feedback",
       validate: (text) => text.trim() ? null : "Say what needs changing \u2014 an empty note blocks the re-review and tells nobody anything."
     });
-    return answer ? answer.text.trim() : null;
+    return answer ? { text: answer.text.trim(), shot: answer.value === "draw" ? "draw" : answer.value === "shot" ? "shot" : "none" } : null;
   }
   async function askReply(quoting) {
     const short = quoting.length > 220 ? quoting.slice(0, 220) + "\u2026" : quoting;
@@ -5155,7 +6958,18 @@ body > .embody { flex:1; min-height:0; overflow:auto; }
   border-radius:3px; cursor:pointer; background:var(--color-back);
   color:var(--color-text); border:1px solid var(--color-border); }
 .embody .shotb:hover { border-color:var(--color-accent); }
+.embody .shotimg { display:block; max-width:100%; max-height:220px; border-radius:3px;
+  border:1px solid var(--color-border); cursor:zoom-in; }
+.embody .shotimg:hover { border-color:var(--color-accent); }
+.embody .pin { height:auto; min-width:0; padding:0 6px; font-size:9px; line-height:16px;
+  border-radius:8px; cursor:pointer; background:rgba(90,140,220,.16); color:#8db4ec;
+  border:1px solid transparent; font-variant-numeric:tabular-nums; }
+.embody .pin:hover { border-color:#8db4ec; }
+.embody .pin .pincam { font-size:9px; margin-left:3px; opacity:.85; }
+.embody .pin .pinrng { margin-left:5px; padding-left:5px; border-left:1px solid rgba(141,180,236,.4); opacity:.85; }
 .embody .thact { margin:7px 0 0 22px; display:flex; gap:5px; }
+.embody .thdel { margin-left:auto; }
+.embody .thdel:hover { color:#e78b8b; }
 .embody .thact .ib { margin-left:0; }
 .embody .thfoot { margin:7px 0 0 22px; display:flex; align-items:center; gap:7px;
   font-size:9px; opacity:.6; }
@@ -5289,6 +7103,51 @@ body > .embody { flex:1; min-height:0; overflow:auto; }
 .kmbtn.primary { background:var(--color-accent); color:var(--color-accent_text);
   border-color:var(--color-accent); }
 .kmbtn.primary:hover { filter:brightness(1.1); }
+/* The expanded note view: wide enough for a screenshot to be read. */
+.kmbox.kmmed { max-width:min(680px, calc(100vw - 32px)); width:min(680px, calc(100vw - 32px)); }
+.kmbox.kmmed .kmbody { max-height:calc(100vh - 140px); overflow-y:auto; }
+.knv-note { padding:8px 0; border-top:1px solid var(--color-border); }
+.knv-note:first-child { border-top:0; padding-top:0; }
+.knv-note.done { opacity:.7; }
+.knv-who { display:flex; align-items:center; gap:7px; font-size:11px; }
+.knv-who span { opacity:.55; font-variant-numeric:tabular-nums; }
+.knv-st { margin-left:auto; font-size:8.5px; text-transform:uppercase; letter-spacing:.04em;
+  padding:1px 5px; border-radius:3px; }
+.knv-st.op { background:rgba(208,82,82,.16); color:#e78b8b; }
+.knv-st.ok { background:rgba(90,164,105,.16); color:#79c98a; }
+.knv-text { margin:5px 0 0; font-size:12px; line-height:1.55; white-space:pre-wrap; word-break:break-word; }
+.knv-img { display:block; max-width:100%; max-height:60vh; margin-top:7px; border-radius:4px;
+  border:1px solid var(--color-border); }
+.knv-pending { margin-top:5px; font-size:10px; opacity:.55; }
+.knv-act { display:flex; gap:6px; margin-top:8px; }
+.knl-row { display:flex; align-items:flex-start; gap:10px; padding:8px 0; border-top:1px solid var(--color-border); }
+.knl-row:first-child { border-top:0; padding-top:0; }
+.knl-row.done { opacity:.6; }
+.knl-go { flex:none; font-variant-numeric:tabular-nums; font-size:10px; padding:3px 8px; }
+.knl-body { flex:1; min-width:0; }
+.knl-text { margin-top:3px; font-size:11.5px; line-height:1.45; white-space:pre-wrap; word-break:break-word; }
+.knl-cam { font-size:10px; opacity:.7; }
+.knl-tick { flex:none; }
+.knv-del { margin-left:auto; opacity:.7; }
+.knv-del:hover { opacity:1; background:rgba(208,82,82,.25); color:#e78b8b; }
+/* The mark-up dialog is as wide as the screenshot needs, up to the window. */
+.kmbox.kmwide { max-width:min(1320px, calc(100vw - 32px)); }
+.kdo-bar { display:flex; align-items:center; gap:4px; margin-bottom:8px; }
+.kdo-t { all:unset; box-sizing:border-box; display:inline-flex; align-items:center; justify-content:center;
+  width:26px; height:24px; border-radius:3px; background:var(--color-button); color:var(--color-text);
+  cursor:pointer; border:1px solid transparent; }
+.kdo-t:hover { border-color:var(--color-accent); }
+.kdo-t.on { background:var(--color-accent); color:var(--color-accent_text); }
+.kdo-t .material-icons { font-size:16px; line-height:1; }
+.kdo-c { all:unset; box-sizing:border-box; width:18px; height:18px; border-radius:50%; background:var(--c);
+  cursor:pointer; border:2px solid transparent; box-shadow:0 0 0 1px rgba(0,0,0,.4); }
+.kdo-c.on { border-color:var(--color-text); }
+.kdo-sep { width:1px; height:16px; background:var(--color-border); margin:0 3px; }
+.kdo-hint { margin-left:auto; font-size:10px; opacity:.6; }
+.kdo-wrap { display:flex; justify-content:center; background:var(--color-back); border-radius:3px;
+  border:1px solid var(--color-border); padding:4px; }
+.kdo-canvas { display:block; max-width:min(1280px, calc(100vw - 80px)); max-height:calc(100vh - 190px);
+  width:auto; height:auto; cursor:crosshair; touch-action:none; }
 `;
   var KEBAB_CSS = `
 .embody .kebab { padding:0 3px; height:auto; min-width:0; line-height:1;
@@ -5310,6 +7169,7 @@ body > .embody { flex:1; min-height:0; overflow:auto; }
 .embody .notice.git { border-color:rgba(63,143,208,.5);
   background:rgba(63,143,208,.10); }
 .embody .notice.git b { font-weight:600; }
+.embody .notice.git.push { border-color:rgba(224,160,48,.5); }
 .embody .notice.git.bad { border-color:rgba(208,82,82,.5);
   background:rgba(208,82,82,.10); }
 .embody .notice.git button[disabled] { opacity:.5; cursor:default; }
@@ -5656,6 +7516,8 @@ body > .embody { flex:1; min-height:0; overflow:auto; }
     openroot: { global: true, needsRoot: true },
     github: { global: true, needsRoot: true },
     devreload: { global: true },
+    /** Debug: says which condition the timeline review bar is failing on. */
+    reviewbardiag: { global: true },
     /** DEBUG ONLY — leaving the view-as mode. Remove with src/debug/. */
     viewasoff: { global: true },
     /** The toolbar's Debug dropdown and its entries. Rendered only with the debug setting on. */
@@ -5757,10 +7619,14 @@ body > .embody { flex:1; min-height:0; overflow:auto; }
     showfb: { global: true },
     showall: { global: true },
     openshot: { global: true },
+    /** Seek Blockbench to the frame a note was left at. Reads nothing from Jira. */
+    seeknote: { global: true },
     newfb: { writes: true },
     /** Pick a model or clip, then leave the first note on it (D-71). */
     leavefb: { writes: true },
     resolvefb: { writes: true },
+    /** Delete a note. Offered to all; Jira's comment permissions decide (non-negotiable 4). */
+    delfb: { writes: true },
     reopenfb: { writes: true },
     replyfb: { writes: true },
     rerequest: { writes: true },
@@ -5841,17 +7707,17 @@ body > .embody { flex:1; min-height:0; overflow:auto; }
   function installNag(getState) {
     uninstallNag();
     read = getState;
-    installed = 0;
+    installed3 = 0;
     ensureNag();
     updateNag();
   }
-  var installed = 0;
+  var installed3 = 0;
   function ensureNag() {
     const existing = document.getElementById(ID);
     if (existing) return existing;
     const bar = document.getElementById("menu_bar");
     if (!bar) {
-      if (installed === 0) trace("nag: no #menu_bar to attach to");
+      if (installed3 === 0) trace("nag: no #menu_bar to attach to");
       return null;
     }
     const el = document.createElement("div");
@@ -5868,8 +7734,8 @@ body > .embody { flex:1; min-height:0; overflow:auto; }
     });
     el.appendChild(hush);
     bar.append(el);
-    installed++;
-    if (installed <= 3) trace(`nag: inserted (${installed})`);
+    installed3++;
+    if (installed3 <= 3) trace(`nag: inserted (${installed3})`);
     return el;
   }
   function uninstallNag() {
@@ -5943,9 +7809,9 @@ body > .embody { flex:1; min-height:0; overflow:auto; }
     let bestScore = 0;
     let bestCount = 0;
     for (const [dir, count] of counts) {
-      const have = new Set(tokens(dir.split("/").join(" ")).map(stem));
+      const have2 = new Set(tokens(dir.split("/").join(" ")).map(stem));
       let score = 0;
-      for (const w of wanted) if (have.has(w)) score++;
+      for (const w of wanted) if (have2.has(w)) score++;
       if (score > bestScore || score === bestScore && score > 0 && count > bestCount) {
         best = dir;
         bestScore = score;
@@ -5995,8 +7861,8 @@ body > .embody { flex:1; min-height:0; overflow:auto; }
     return answer === "bring" || answer === "stash" ? answer : null;
   }
   async function openNewBranchDialog(repoRoot, suggestedBase) {
-    const { current: current2, branches } = await listBranches(repoRoot);
-    const base = suggestedBase ?? current2 ?? branches[0];
+    const { current: current3, branches } = await listBranches(repoRoot);
+    const base = suggestedBase ?? current3 ?? branches[0];
     if (!base) {
       await showMessage(
         "No branches yet",
@@ -6014,7 +7880,7 @@ body > .embody { flex:1; min-height:0; overflow:auto; }
       textPlaceholder: "feat/pot-of-soup",
       mono: true,
       selectLabel: "Based on",
-      options: branches.map((b) => ({ value: b, label: b === current2 ? `${b} (current)` : b })),
+      options: branches.map((b) => ({ value: b, label: b === current3 ? `${b} (current)` : b })),
       value: base,
       confirmLabel: "Create branch",
       validate: (name2) => {
@@ -6136,9 +8002,9 @@ body > .embody { flex:1; min-height:0; overflow:auto; }
   // src/ui/rootdialog.ts
   async function openRootDialog(projectKey, projectName, onSaved) {
     const existing = getRoot(projectKey);
-    const title = `Repository root for ${projectName}`;
+    const title2 = `Repository root for ${projectName}`;
     const choice = await chooseText({
-      title,
+      title: title2,
       note: "The folder holding this client's art repository. Jira stores paths relative to it, so every artist can point at their own copy and still resolve the same files. It is never uploaded or shared.",
       label: "Folder",
       value: existing || "",
@@ -6150,7 +8016,7 @@ body > .embody { flex:1; min-height:0; overflow:auto; }
         const check2 = checkRoot(projectKey, text);
         return check2.ok ? null : check2.error || "Could not use that folder";
       },
-      onBrowse: () => pickFolder({ title, startPath: existing || void 0 })
+      onBrowse: () => pickFolder({ title: title2, startPath: existing || void 0 })
     });
     if (!choice) return;
     if ("extra" in choice) {
@@ -6183,7 +8049,7 @@ body > .embody { flex:1; min-height:0; overflow:auto; }
       toast(`Could not read components: ${e?.message || e}`, 3e3);
       return;
     }
-    const current2 = settings().components;
+    const current3 = settings().components;
     const counts = /* @__PURE__ */ new Map();
     for (const t of tasks) {
       for (const c of t.components) counts.set(c, (counts.get(c) || 0) + 1);
@@ -6196,7 +8062,7 @@ body > .embody { flex:1; min-height:0; overflow:auto; }
         const mine = counts.get(c.name) || 0;
         const bits = [c.leadName ? `lead ${c.leadName}` : "no lead"];
         if (mine) bits.push(`${mine} assigned to you`);
-        return { value: c.name, label: c.name, description: bits.join(" \xB7 "), checked: current2.includes(c.name) };
+        return { value: c.name, label: c.name, description: bits.join(" \xB7 "), checked: current3.includes(c.name) };
       }),
       // An empty scope hides every tagged task and leaves only the gated lane,
       // which reads as the plugin being broken. Refuse it.
@@ -6250,13 +8116,13 @@ body > .embody { flex:1; min-height:0; overflow:auto; }
   }
 
   // src/ui/taskfields.ts
-  async function askAnimationTool(taskKey, current2) {
+  async function askAnimationTool(taskKey, current3) {
     const choice = await chooseOne({
       title: `Where is ${taskKey} animated?`,
       note: "Blockbench work appears in My Work. Blender work does not \u2014 this plugin cannot open a .blend \u2014 but it stays visible under \u201Cshow all\u201D.",
       label: "Animated in",
       options: ANIMATION_TOOLS.map((t) => ({ value: t, label: t })),
-      value: current2 ?? "Blockbench",
+      value: current3 ?? "Blockbench",
       confirm: "Save"
     });
     return choice === "Blockbench" || choice === "Blender" ? choice : null;
@@ -6277,7 +8143,7 @@ ${String(e?.message || e)}`
     }
     onSaved();
   }
-  async function openComponentDialog(taskKey, current2, onSaved, currentLabels = []) {
+  async function openComponentDialog(taskKey, current3, onSaved, currentLabels = []) {
     let field;
     try {
       field = readField(await editMeta(taskKey), "components");
@@ -6294,7 +8160,7 @@ That usually means the field is not on this issue type's edit screen, or you do 
       );
       return;
     }
-    const currentId = field.options.find((o) => o.name === current2)?.id ?? field.options[0].id;
+    const currentId = field.options.find((o) => o.name === current3)?.id ?? field.options[0].id;
     const choice = await chooseOne({
       title: `Component for ${taskKey}`,
       note: "The component decides who reviews this task. Without one it cannot reach QA.",
@@ -6345,7 +8211,7 @@ ${String(e?.message || e)}`
 That usually means the field is not on this issue type's edit screen, or you do not have Edit Issues permission in this project. Either is an admin setting rather than something the plugin can work around.`
     );
   }
-  async function openPriorityDialog(taskKey, current2, onSaved) {
+  async function openPriorityDialog(taskKey, current3, onSaved) {
     let field;
     try {
       field = readField(await editMeta(taskKey), "priority");
@@ -6364,7 +8230,7 @@ That usually means the field is not on this issue type's edit screen, or you do 
       note: "Highest sorts to the top of its lane. Low and Lowest fade the card without disabling it. Medium is the default and renders no chip.",
       label: "Priority",
       options: field.options.map((o) => ({ value: o.id, label: o.name })),
-      value: field.options.find((o) => o.name === current2)?.id ?? field.options[0].id
+      value: field.options.find((o) => o.name === current3)?.id ?? field.options[0].id
     });
     if (choice === null) return;
     const chosen = field.options.find((o) => o.id === choice);
@@ -6377,7 +8243,7 @@ That usually means the field is not on this issue type's edit screen, or you do 
     toast(`${taskKey} \u2192 ${chosen?.name ?? "set"}`, 2500);
     onSaved();
   }
-  async function openDueDialog(taskKey, current2, onSaved) {
+  async function openDueDialog(taskKey, current3, onSaved) {
     let field;
     try {
       field = readField(await editMeta(taskKey), "duedate");
@@ -6390,8 +8256,8 @@ That usually means the field is not on this issue type's edit screen, or you do 
       return;
     }
     const choice = await chooseDate({
-      title: current2 ? `Change due date \u2014 ${taskKey}` : `Set due date \u2014 ${taskKey}`,
-      value: current2,
+      title: current3 ? `Change due date \u2014 ${taskKey}` : `Set due date \u2014 ${taskKey}`,
+      value: current3,
       hint: "Overdue tasks jump to the top of their lane regardless of priority. Clear removes the date entirely."
     });
     if (choice === null) return;
@@ -6752,7 +8618,7 @@ That usually means the field is not on this issue type's edit screen, or you do 
   }
 
   // src/ui/versions.ts
-  async function apply(taskKey, mutate, success, done, extra) {
+  async function apply2(taskKey, mutate, success, done, extra) {
     try {
       await updateAssetMap(taskKey, mutate);
       toast(success, 2500);
@@ -6765,7 +8631,7 @@ That usually means the field is not on this issue type's edit screen, or you do 
     }
   }
   async function makeCurrent(ref, done) {
-    await apply(
+    await apply2(
       ref.taskKey,
       (m) => setCurrent(m, ref.assetId, ref.variant, ref.version),
       ref.version + " is now current",
@@ -6862,7 +8728,7 @@ That usually means the field is not on this issue type's edit screen, or you do 
         validate: (name) => name.trim() ? null : "Give the variant a name."
       });
       if (!answer2) return;
-      await apply(
+      await apply2(
         ref.taskKey,
         (m) => renameVariant(m, ref.assetId, "", answer2.text.trim()),
         "Existing files are now the " + answer2.text.trim() + " variant",
@@ -6888,7 +8754,7 @@ That usually means the field is not on this issue type's edit screen, or you do 
       }
     });
     if (!answer) return;
-    await apply(
+    await apply2(
       ref.taskKey,
       (m) => addVariant(m, ref.assetId, answer.text.trim()),
       "Added the " + answer.text.trim() + " variant",
@@ -6896,13 +8762,13 @@ That usually means the field is not on this issue type's edit screen, or you do 
     );
   }
   async function moveOrRename(ref, root, done) {
-    const current2 = ref.path || "";
-    const onDisk = !!current2 && existsOnDisk(toNative(resolveIn(root, current2)));
+    const current3 = ref.path || "";
+    const onDisk = !!current3 && existsOnDisk(toNative(resolveIn(root, current3)));
     const answer = await chooseTextAndSelect({
       title: "Move or rename",
       note: onDisk ? "Jira records the new path. Moving the file itself is optional \u2014 a record can be corrected without touching anything on disk." : "Nothing is at the recorded path, so only the record can change here. If the file exists somewhere else, Locate is the better tool.",
       textLabel: "File, relative to the repository root",
-      textValue: current2,
+      textValue: current3,
       mono: true,
       selectLabel: "On disk",
       options: [
@@ -6914,20 +8780,20 @@ That usually means the field is not on this issue type's edit screen, or you do 
       validate: (path) => {
         const problem = validateTarget(path);
         if (problem) return problem;
-        if (path.trim() === current2) return "That is where it already is.";
+        if (path.trim() === current3) return "That is where it already is.";
         return null;
       }
     });
     if (!answer) return;
     if (answer.value === "move") {
       try {
-        renameOnDisk(toNative(resolveIn(root, current2)), toNative(resolveIn(root, answer.text)));
+        renameOnDisk(toNative(resolveIn(root, current3)), toNative(resolveIn(root, answer.text)));
       } catch (e) {
         await showMessage("Could not move the file", String(e?.message || e));
         return;
       }
     }
-    await apply(
+    await apply2(
       ref.taskKey,
       (m) => movePath(m, ref.assetId, ref.variant, ref.version, answer.text.trim()),
       "Path updated",
@@ -6981,7 +8847,7 @@ That usually means the field is not on this issue type's edit screen, or you do 
       confirmLabel: "Rewrite"
     });
     if (!yes) return;
-    await apply(
+    await apply2(
       taskKey,
       (m) => rebasePaths(m, { from, to: answer.text.trim() }),
       affected.length + " path" + (affected.length === 1 ? "" : "s") + " rewritten",
@@ -7154,15 +9020,15 @@ The checklist has been reloaded \u2014 try the rename again.`
     if (!asset || !variant) return;
     const names = Object.keys(asset.variants);
     const paths = Object.values(variant.files).map((f) => f.path);
-    const last = names.length === 1;
+    const last2 = names.length === 1;
     const yes = await confirmChecked({
       title: "Remove the " + (ref.variant || "unnamed") + " variant?",
-      html: (paths.length ? '<p class="kmtext">' + paths.length + " recorded file" + (paths.length === 1 ? "" : "s") + " will stop being recorded against " + esc(ref.taskKey) + ':</p><p class="kmtext">' + paths.map((p) => "<code>" + esc(p) + "</code>").join("<br>") + "</p>" : '<p class="kmtext">This variant has no files recorded against it.</p>') + (last ? '<p class="kmnote">It is the only variant, so the model itself stops being recorded on this task.</p>' : "") + '<p class="kmnote">No file is deleted, moved or changed. Each keeps the identity written inside it, so any of them may be suggested again.</p>',
+      html: (paths.length ? '<p class="kmtext">' + paths.length + " recorded file" + (paths.length === 1 ? "" : "s") + " will stop being recorded against " + esc(ref.taskKey) + ':</p><p class="kmtext">' + paths.map((p) => "<code>" + esc(p) + "</code>").join("<br>") + "</p>" : '<p class="kmtext">This variant has no files recorded against it.</p>') + (last2 ? '<p class="kmnote">It is the only variant, so the model itself stops being recorded on this task.</p>' : "") + '<p class="kmnote">No file is deleted, moved or changed. Each keeps the identity written inside it, so any of them may be suggested again.</p>',
       checkboxLabel: paths.length ? "I know these files do not belong to this model." : "Remove this variant.",
       confirmLabel: "Remove variant"
     });
     if (!yes) return;
-    await apply(
+    await apply2(
       ref.taskKey,
       (m) => removeVariant(m, ref.assetId, ref.variant),
       "Removed the " + (ref.variant || "unnamed") + " variant",
@@ -7485,6 +9351,10 @@ Turn writes back on from the Kumonga menu, or stop viewing as them.`;
   }
   var realAccountId = null;
   var meAccountId = null;
+  var shotCache = {};
+  var barReview = null;
+  var RETRY_REVIEW_MS = 6e4;
+  var shotFailedAt = {};
   var barMenu = null;
   var menuActions = [];
   var child = null;
@@ -7556,11 +9426,12 @@ Turn writes back on from the Kumonga menu, or stop viewing as them.`;
     child.document.querySelector(".wbtns")?.addEventListener("click", onWindowButton);
     setModalHost(child.document);
     childRoot = child.document.getElementById("embody_jira_root");
-    childRoot?.addEventListener("click", onClick);
+    childRoot?.addEventListener("click", onClick4);
     childRoot?.addEventListener("change", onChange);
     child.addEventListener("focus", onFocus);
     window.addEventListener("beforeunload", closeOnQuit);
     window.addEventListener("beforeunload", warnAboutTimer);
+    window.addEventListener("beforeunload", warnAboutUnpushed);
     const me = child;
     child.addEventListener("beforeunload", () => {
       trace(`child beforeunload, closing=${closing}${child === me ? "" : " (superseded window)"}`);
@@ -7647,8 +9518,84 @@ Turn writes back on from the Kumonga menu, or stop viewing as them.`;
       });
     }, 0);
   }
+  var pushAllowed = false;
+  var pushPrompting = false;
+  function warnAboutUnpushed(ev) {
+    if (pushAllowed || quitPrompting) return;
+    if (!repositoriesToCheck().length) return;
+    ev.preventDefault();
+    ev.returnValue = "Checking for work that has not been pushed.";
+    if (pushPrompting) return;
+    pushPrompting = true;
+    setTimeout(async () => {
+      const quit = () => {
+        pushAllowed = true;
+        window.close();
+      };
+      const rows = await unpushedRepositories();
+      if (!rows.length) {
+        pushPrompting = false;
+        quit();
+        return;
+      }
+      const answer = await openQuitDialog(rows, {
+        openDesktop: (r) => {
+          if (r.remote) {
+            try {
+              nodeRequire("shell").openExternal(gitHubDesktopUrl(r.remote));
+              return;
+            } catch {
+            }
+          }
+          try {
+            nodeRequire("shell").openPath(toNative(r.root));
+          } catch {
+          }
+        },
+        recheck: () => unpushedRepositories()
+      });
+      pushPrompting = false;
+      if (answer === "quit") quit();
+    }, 0);
+  }
+  function repositoriesToCheck() {
+    const keys = new Set(state.projects.map((p) => p.key));
+    const client = settings().client;
+    if (client && !isAggregate(client)) keys.add(client);
+    for (const t of state.tasks) keys.add(t.projectKey);
+    const byRoot = /* @__PURE__ */ new Map();
+    for (const key of keys) {
+      const root = getRoot(key);
+      if (!root) continue;
+      const repo = repoFor(root);
+      if (!repo) continue;
+      const entry = byRoot.get(repo.root) ?? { root: repo.root, projects: [], remote: repo.remote ?? null };
+      entry.projects.push({ key, name: state.projects.find((p) => p.key === key)?.name ?? key });
+      byRoot.set(repo.root, entry);
+    }
+    return [...byRoot.values()];
+  }
+  async function unpushedRepositories() {
+    const budget = new Promise((r) => setTimeout(() => r(null), 6e3));
+    const checks = repositoriesToCheck().map(async (r) => {
+      const st = await Promise.race([branchState(r.root).catch(() => null), budget]);
+      if (!st || st.ahead < 1 && !st.dirty) return null;
+      return {
+        projects: r.projects,
+        root: r.root,
+        branch: st.branch,
+        ahead: st.ahead,
+        dirty: st.dirty,
+        remote: r.remote,
+        local: !st.upstream
+      };
+    });
+    return (await Promise.all(checks)).filter((r) => r !== null);
+  }
   var closeOnQuit = () => {
-    if (!runningTimer() || quitAllowed) closeChild("teardown");
+    const timerClear = !runningTimer() || quitAllowed;
+    const pushClear = pushAllowed || !repositoriesToCheck().length;
+    if (timerClear && pushClear) closeChild("teardown");
   };
   function viewModel() {
     const s = settings();
@@ -7697,6 +9644,7 @@ Turn writes back on from the Kumonga menu, or stop viewing as them.`;
       transitions: state.transitions,
       review: state.review,
       reviewTarget: state.reviewTarget,
+      shots: loadedShots(),
       itemMenu: state.itemMenu,
       itemMenuAt: state.itemMenuAt,
       signingIn: state.signingIn,
@@ -7742,6 +9690,7 @@ Turn writes back on from the Kumonga menu, or stop viewing as them.`;
   }
   function render() {
     updateNag();
+    updateReviewBar();
     if (!childRoot || !child || child.closed) return;
     try {
       childRoot.innerHTML = renderPanel(viewModel());
@@ -7781,9 +9730,9 @@ Turn writes back on from the Kumonga menu, or stop viewing as them.`;
     void checkGit(true);
     scheduleNextPoll();
   }
-  function readClips(task, map, rootPath, disk) {
-    if (!task || !rootPath || !map) return null;
-    if (!sharesOneFile(animationShape(task, null))) return null;
+  function readClips(task2, map, rootPath, disk) {
+    if (!task2 || !rootPath || !map) return null;
+    if (!sharesOneFile(animationShape(task2, null))) return null;
     const paths = [];
     for (const asset of Object.values(map.assets ?? {})) {
       for (const file2 of allFiles(asset)) paths.push(file2.path);
@@ -7798,8 +9747,8 @@ Turn writes back on from the Kumonga menu, or stop viewing as them.`;
     return { path: rel, names: clipsOf(toNative(resolveIn(rootPath, rel))) };
   }
   async function loadDetail(key) {
-    const task = findTask(key);
-    const rootPath = rootForTask(task);
+    const task2 = findTask(key);
+    const rootPath = rootForTask(task2);
     const base = () => ({
       key,
       loading: false,
@@ -7814,7 +9763,7 @@ Turn writes back on from the Kumonga menu, or stop viewing as them.`;
     render();
     try {
       if (rootPath && !state.disk) state.disk = scanRoot(rootPath);
-      const names = (task?.checklist ?? []).map((i) => i.name);
+      const names = (task2?.checklist ?? []).map((i) => i.name);
       const [map, logs] = await Promise.all([
         getAssetMap(key),
         names.length ? listJiraWorklogs(key).catch(() => null) : Promise.resolve([])
@@ -7824,7 +9773,7 @@ Turn writes back on from the Kumonga menu, or stop viewing as them.`;
         ...base(),
         map,
         disk: state.disk ?? [],
-        clips: readClips(task, map, rootPath, state.disk ?? []),
+        clips: readClips(task2, map, rootPath, state.disk ?? []),
         itemTime: logs ? itemSeconds(names, logs) : null
       };
     } catch (e) {
@@ -7936,7 +9885,7 @@ Turn writes back on from the Kumonga menu, or stop viewing as them.`;
   }
   async function applyRepair(req) {
     try {
-      await updateAssetMap(req.taskKey, (current2) => addFileToMap(current2, {
+      await updateAssetMap(req.taskKey, (current22) => addFileToMap(current22, {
         assetId: req.assetId,
         item: null,
         // an existing item text always wins
@@ -7991,7 +9940,7 @@ Turn writes back on from the Kumonga menu, or stop viewing as them.`;
     }
   }
   function gitStateFrom(st, checkedAt) {
-    if (!st || !st.upstream) return null;
+    if (!st) return null;
     return {
       branch: st.branch,
       behind: st.behind,
@@ -8070,8 +10019,8 @@ ${url}`
     const key = settings().aggregateProject;
     return !!key && !!client && client === key;
   }
-  function rootForTask(task) {
-    if (task?.projectKey) return getRoot(task.projectKey);
+  function rootForTask(task2) {
+    if (task2?.projectKey) return getRoot(task2.projectKey);
     const client = settings().client;
     return client && !isAggregate(client) ? getRoot(client) : null;
   }
@@ -8116,7 +10065,7 @@ ${url}`
     });
     if (!yes) return;
     try {
-      await updateAssetMap(req.taskKey, (current2) => removeFileFromMap(current2, {
+      await updateAssetMap(req.taskKey, (current22) => removeFileFromMap(current22, {
         assetId: req.assetId,
         variant: req.variant,
         version: req.version
@@ -8131,8 +10080,8 @@ ${url}`
   async function runCreate(taskKey, itemText) {
     const rootPath = rootForTask(findTask(taskKey));
     if (!rootPath) return;
-    const task = findTask(taskKey);
-    const base = itemText ?? task?.summary ?? taskKey;
+    const task2 = findTask(taskKey);
+    const base = itemText ?? task2?.summary ?? taskKey;
     const map = state.detail?.key === taskKey ? state.detail?.map ?? null : null;
     const siblings = map ? Object.values(map.assets).flatMap((a) => Object.values(a.variants).flatMap((v) => Object.values(v.files).map((f) => f.path))) : [];
     let disk = [];
@@ -8152,7 +10101,7 @@ ${url}`
         // The breadcrumb names the area of the game, and the repository is laid
         // out by area — without it, "Food Items" landed in the busiest folder
         // in the repo rather than anywhere near Bree.
-        context: [task?.summary, task?.parent, task?.epic].filter((c) => !!c)
+        context: [task2?.summary, task2?.parent, task2?.epic].filter((c) => !!c)
       },
       () => {
         state.disk = null;
@@ -8303,8 +10252,8 @@ ${url}`
     return scopes;
   }
   async function setItemState(key, index, raw, label) {
-    const task = findTask(key);
-    const status = itemStatuses(task?.checklistFormat ?? null).find((s) => s.label === label);
+    const task2 = findTask(key);
+    const status = itemStatuses(task2?.checklistFormat ?? null).find((s) => s.label === label);
     if (!status) {
       void showMessage(
         "Could not change that item",
@@ -8312,7 +10261,7 @@ ${url}`
       );
       return;
     }
-    const lead = !!task?.component && state.leadScopes.some((sc) => sc.components.includes(task.component));
+    const lead = !!task2?.component && state.leadScopes.some((sc) => sc.components.includes(task2.component));
     if (status.label === "Done" && !lead) {
       await showMessage(
         "Done is your lead\u2019s call",
@@ -8320,12 +10269,12 @@ ${url}`
       );
       return;
     }
-    const item = task?.checklist?.find((i) => i.index === index);
+    const item = task2?.checklist?.find((i) => i.index === index);
     if (item?.resolved && !/^(done|skipped|in qa|qa)$/i.test(status.label)) {
-      const current2 = statusOf(item, task?.checklistFormat ?? null);
+      const current3 = statusOf(item, task2?.checklistFormat ?? null);
       const yes = await confirmHtml(
         `Reopen "${item.name}"?`,
-        `<p class="kmtext">It is <b>${esc(current2)}</b>. Marking it <b>${esc(status.label)}</b> undoes that for whoever set it.</p>`,
+        `<p class="kmtext">It is <b>${esc(current3)}</b>. Marking it <b>${esc(status.label)}</b> undoes that for whoever set it.</p>`,
         "Reopen"
       );
       if (!yes) return;
@@ -8349,12 +10298,12 @@ The checklist has been reloaded \u2014 pick the item again.`
     }
   }
   function clipItemsOf(key) {
-    const task = findTask(key);
-    return (task?.checklist ?? []).map((i) => ({
+    const task2 = findTask(key);
+    return (task2?.checklist ?? []).map((i) => ({
       index: i.index,
       name: i.name,
       raw: i.raw,
-      status: statusOf(i, task?.checklistFormat ?? null)
+      status: statusOf(i, task2?.checklistFormat ?? null)
     }));
   }
   function clipsFor(key) {
@@ -8365,9 +10314,9 @@ The checklist has been reloaded \u2014 pick the item again.`
   }
   async function tickClips(key) {
     const found = clipsFor(key);
-    const task = findTask(key);
-    if (!found || !task) return;
-    if (!task.component || !state.leadScopes.some((sc) => sc.components.includes(task.component))) {
+    const task2 = findTask(key);
+    if (!found || !task2) return;
+    if (!task2.component || !state.leadScopes.some((sc) => sc.components.includes(task2.component))) {
       await showMessage(
         "Done is your lead\u2019s call",
         "Mark the clips In QA when they are ready for review; the lead of this component marks them Done."
@@ -8377,7 +10326,7 @@ The checklist has been reloaded \u2014 pick the item again.`
     const report = assessClips(found.items.map((i) => i.name), found.names);
     const todo = tickable(found.items, report);
     if (!todo.length) return;
-    const status = itemStatuses(task.checklistFormat).find((s) => s.label === "Done");
+    const status = itemStatuses(task2.checklistFormat).find((s) => s.label === "Done");
     if (!status) {
       await showMessage(
         "Nothing to mark with",
@@ -8408,8 +10357,8 @@ The checklist has been reloaded \u2014 pick the item again.`
     const report = assessClips(found.items.map((i) => i.name), found.names);
     const fresh = newClipNames(report.extra, found.items.map((i) => i.name));
     if (!fresh.length) return;
-    const task = findTask(key);
-    const inQa = task?.status === "QA";
+    const task2 = findTask(key);
+    const inQa = task2?.status === "QA";
     const yes = await confirmHtml(
       `Add ${fresh.length} clip${fresh.length === 1 ? "" : "s"} to the checklist?`,
       '<p class="kmtext">These are in the file and not on the list:</p><p class="kmtext">' + fresh.map((n) => esc(n)).join(", ") + '</p><p class="kmnote">They are added at the end as Todo. Nothing already on the checklist is touched.</p>' + (inQa ? '<p class="kmwarn">This task is in QA. Once they are added it goes back to the artist as Needs Changes, and you will be asked what to tell them.</p>' : ""),
@@ -8427,7 +10376,7 @@ The checklist has been reloaded \u2014 pick the item again.`
       void showMessage("Could not add those clips", e?.message || String(e));
       return;
     }
-    if (!inQa || !task) {
+    if (!inQa || !task2) {
       await load(true);
       return;
     }
@@ -8446,9 +10395,9 @@ The checklist has been reloaded \u2014 pick the item again.`
         taskKey: key,
         transition: back,
         to: back.to,
-        from: task.status,
+        from: task2.status,
         map: state.detail?.key === key ? state.detail?.map ?? null : null,
-        root: rootForTask(task),
+        root: rootForTask(task2),
         // The new clips are what needs doing, so they are what the note is aimed at.
         targets: fresh.map((n) => ({ kind: "clip", id: n, label: n, checked: true })),
         postFeedback: (kind, id, text) => postScopedFeedback(key, kind, id, text).then(() => {
@@ -8469,6 +10418,7 @@ The checklist has been reloaded \u2014 pick the item again.`
       const threads = await listReview(key);
       if (state.expanded !== key) return;
       state.review = { key, loading: false, error: null, threads };
+      void loadShots(threads.flatMap((t) => t.attachments));
     } catch (e) {
       if (state.expanded !== key) return;
       state.review = { key, loading: false, error: e?.message || String(e), threads: [] };
@@ -8476,19 +10426,212 @@ The checklist has been reloaded \u2014 pick the item again.`
     render();
   }
   async function newFeedback(taskKey, kind, id, label) {
-    const text = await askNote(kind, label || id);
-    if (!text) return;
-    const ok = await postScopedFeedback(taskKey, kind, id, text);
+    const pin = kind === "clip" ? playheadFor(id) : null;
+    const project = openProject();
+    const camera = project && project.jiraKey === taskKey ? cameraNow() : null;
+    const range = pin ? loopRangeNow() : null;
+    const note = await askNote(kind, label || id, {
+      pin: pin ? formatPin(pin) : null,
+      range: range ? formatRange(range) : null,
+      // The viewport is worth a picture only when the open project is this
+      // task's file; a screenshot of some other model would mislead.
+      canShoot: !!project && project.jiraKey === taskKey
+    });
+    if (!note) return;
+    const attachments = [];
+    if (note.shot !== "none") {
+      let shot = await captureViewport();
+      if (!shot) {
+        await showMessage(
+          "No screenshot taken",
+          "Blockbench has no viewport to photograph right now. The note is posted without one."
+        );
+      } else {
+        if (note.shot === "draw") shot = await drawOver(shot);
+        try {
+          const up = await uploadAttachment(
+            taskKey,
+            shotFilename(taskKey, kind === "clip" ? id : null, pin?.frame ?? null),
+            shot.png,
+            "image/png"
+          );
+          attachments.push(up);
+          shotCache[up.id] = shot.dataUrl;
+        } catch (e) {
+          await showMessage(
+            "Screenshot not attached",
+            "The note will be posted without it. " + (e?.message || String(e))
+          );
+        }
+      }
+    }
+    const ok = await postScopedFeedback(taskKey, kind, id, note.text, { attachments, at: pin, camera, range });
     if (!ok) return;
+    if (barReview?.key === taskKey) barReview = null;
     await load(true);
     if (state.expanded === taskKey) void loadReview(taskKey);
+  }
+  function timelineRefusal(act, task2) {
+    const viewing = blockedReason2();
+    if (viewing) return viewing;
+    const verdict = checkAction(act, { task: task2, hasRoot: !!(task2 ? rootForTask(task2) : currentRoot()) });
+    return verdict.allowed ? null : verdict.reason;
+  }
+  function loadedShots() {
+    return Object.fromEntries(
+      Object.entries(shotCache).filter(([, v]) => v !== "loading" && v !== "failed")
+    );
+  }
+  async function resolveFromTimeline(key, commentId, status) {
+    const at = (/* @__PURE__ */ new Date()).toISOString();
+    await setThreadStatus(commentId, status, meAccountId, at);
+    toast(status === "resolved" ? "Resolved" : "Reopened", 1500);
+    noteChanged(key, flipped(commentId, status, at));
+  }
+  function flipped(commentId, status, at) {
+    return (ts) => ts.map((t) => t.commentId !== commentId ? t : {
+      ...t,
+      status,
+      resolvedBy: status === "resolved" ? meAccountId : null,
+      resolvedAt: status === "resolved" ? at : null
+    });
+  }
+  function noteChanged(key, change) {
+    if (state.review?.key === key) state.review = { ...state.review, threads: change(state.review.threads) };
+    if (barReview && barReview.key === key && "threads" in barReview && barReview.threads) {
+      barReview = { key, threads: change(barReview.threads) };
+    }
+    render();
+    if (state.expanded === key) void loadReview(key);
+  }
+  async function deleteThread(key, commentId) {
+    const thread = knownThreads(key)?.find((t) => t.commentId === commentId) ?? null;
+    const shots2 = thread?.attachments.length ?? 0;
+    const yes = await confirmHtml(
+      "Delete this note?",
+      '<p class="kmtext">It is removed from Jira for everyone' + (shots2 ? `, with its ${shots2} screenshot${shots2 === 1 ? "" : "s"}` : "") + '.</p><p class="kmnote">Jira decides whether you may \u2014 a refusal is shown as Jira says it. If this note sent the clip to Needs Changes, that stays; set it back yourself if it should.</p>',
+      "Delete"
+    );
+    if (!yes) return false;
+    try {
+      await deleteFeedback(key, commentId);
+    } catch (e) {
+      await showMessage("Could not delete that note", e?.message || String(e));
+      return false;
+    }
+    const failed = [];
+    for (const id of thread?.attachments ?? []) {
+      try {
+        await deleteAttachment(id);
+        delete shotCache[id];
+      } catch (e) {
+        failed.push(e?.message || String(e));
+      }
+    }
+    toast("Note deleted", 1500);
+    noteChanged(key, (ts) => ts.filter((t) => t.commentId !== commentId));
+    if (failed.length) {
+      await showMessage(
+        "Note deleted, screenshot not",
+        "The note is gone; its screenshot is still attached to the issue and can be removed in Jira.\n\n" + failed[0]
+      );
+    }
+    return true;
+  }
+  function knownThreads(taskKey) {
+    const page = state.review?.key === taskKey ? state.review : null;
+    if (page && !page.loading && !page.error) return page.threads;
+    if (barReview && barReview.key === taskKey && "threads" in barReview) return barReview.threads;
+    return null;
+  }
+  function threadsForBar(taskKey) {
+    const known = knownThreads(taskKey);
+    if (known) return known;
+    if (state.review?.key === taskKey && state.review.loading) return null;
+    if (barReview && barReview.key === taskKey) {
+      const failedAt = "threads" in barReview && barReview.threads === null ? barReview.at ?? 0 : null;
+      if (failedAt === null || Date.now() - failedAt < RETRY_REVIEW_MS) return null;
+    }
+    barReview = { key: taskKey, loading: true };
+    listReview(taskKey).then((threads) => {
+      if (barReview?.key !== taskKey) return;
+      barReview = { key: taskKey, threads };
+      updateReviewBar();
+      void loadShots(threads.flatMap((t) => t.attachments));
+    }).catch((e) => {
+      trace(`review for the open file ${taskKey}: ${e?.message || e}`);
+      if (barReview?.key === taskKey) barReview = { key: taskKey, threads: null, at: Date.now() };
+    });
+    return null;
+  }
+  async function loadShots(ids) {
+    const want = [...new Set(ids)].filter((id) => !(id in shotCache) || shotCache[id] === "failed" && Date.now() - (shotFailedAt[id] ?? 0) > RETRY_REVIEW_MS);
+    if (!want.length) return;
+    for (const id of want) shotCache[id] = "loading";
+    await Promise.all(want.map(async (id) => {
+      try {
+        const { data, contentType } = await fetchAttachment(id);
+        const image = contentType.startsWith("image/") && data.length <= 8 * 1024 * 1024;
+        shotCache[id] = image ? `data:${contentType};base64,${data.toString("base64")}` : "failed";
+        if (!image) shotFailedAt[id] = Infinity;
+      } catch (e) {
+        trace(`screenshot ${id}: ${e?.message || e}`);
+        shotCache[id] = "failed";
+        shotFailedAt[id] = Date.now();
+      }
+      render();
+    }));
+  }
+  async function seekToNote(taskKey, commentId) {
+    const thread = knownThreads(taskKey)?.find((t) => t.commentId === commentId) ?? null;
+    if (!thread?.target) return;
+    const pinned = thread.at && thread.target.kind === "clip" ? thread.at : null;
+    if (!pinned && !thread.camera) return;
+    const clip = thread.target.id;
+    const open = openProject();
+    if (!open || open.jiraKey !== taskKey) {
+      const task2 = findTask(taskKey);
+      const rel = state.detail?.key === taskKey ? state.detail.clips?.path : null;
+      const root = rootForTask(task2);
+      if (!rel || !root) {
+        await showMessage(
+          "Open the clip first",
+          "Kumonga does not know which file this clip is in yet. Expand the task, open its animation file, then click the frame again."
+        );
+        return;
+      }
+      try {
+        await openModelFile(toNative(resolveIn(root, rel)));
+      } catch (e) {
+        await showMessage("Could not open the file", e?.message || String(e));
+        return;
+      }
+    }
+    if (pinned) {
+      if (!seekTo(clip, pinned)) {
+        await showMessage(
+          "Clip not in this file",
+          `There is no animation called "${clip}" in the open project, so there is nothing to seek.`
+        );
+        return;
+      }
+      ghostAt(pinned);
+      if (thread.range) setLoopRange(thread.range);
+    }
+    if (thread.camera) restoreCamera(thread.camera);
+    toast(pinned ? `${clip} @ ${formatPin(pinned)}` : "View restored", 1800);
+    try {
+      window.focus();
+    } catch {
+    }
+    updateReviewBar();
   }
   async function leaveFeedback(taskKey) {
     state.menu = null;
     state.menuAt = null;
-    const task = findTask(taskKey);
-    if (!task) return;
-    const targets = reviewTargets(task);
+    const task2 = findTask(taskKey);
+    if (!task2) return;
+    const targets = reviewTargets(task2);
     if (!targets.length) {
       await showMessage(
         "Nothing to leave feedback on",
@@ -8511,10 +10654,18 @@ The checklist has been reloaded \u2014 pick the item again.`
     }
     await newFeedback(taskKey, pick.kind, pick.id, pick.label);
   }
-  async function postScopedFeedback(taskKey, kind, id, text) {
+  async function postScopedFeedback(taskKey, kind, id, text, extra = {}) {
     let posted;
     try {
-      posted = await postFeedback(taskKey, { kind, id }, text);
+      posted = await postFeedback(
+        taskKey,
+        { kind, id },
+        text,
+        extra.attachments ?? [],
+        extra.at ?? null,
+        extra.camera ?? null,
+        extra.range ?? null
+      );
     } catch (e) {
       await showMessage("Could not leave that feedback", e?.message || String(e));
       return false;
@@ -8525,36 +10676,37 @@ The checklist has been reloaded \u2014 pick the item again.`
         "The comment is on the task and the artist will see it in Jira. What failed was the part recording which model it is about, so it will not show against the row here.\n\n" + (posted.reason ?? "") + "\n\nNothing was deleted \u2014 the words are there either way."
       );
     }
-    const task = findTask(taskKey);
-    const item = task ? itemForTarget(task, { kind, id }) : null;
+    const task2 = findTask(taskKey);
+    const item = task2 ? itemForTarget(task2, { kind, id }) : null;
     if (item) {
-      const status = itemStatuses(task.checklistFormat).find((s) => s.label === "Needs Changes");
+      const status = itemStatuses(task2.checklistFormat).find((s) => s.label === "Needs Changes");
       if (status) {
         try {
           await setChecklistStatus(taskKey, item.index, item.raw, status);
         } catch (e) {
           await showMessage(
             "Feedback posted, but the clip was not sent back",
-            `"${item.name}" is still ${statusOf(item, task.checklistFormat)}. ` + (e?.message || String(e))
+            `"${item.name}" is still ${statusOf(item, task2.checklistFormat)}. ` + (e?.message || String(e))
           );
         }
       }
     }
     return true;
   }
-  function reviewTargets(task) {
-    const detail = state.detail?.key === task.key ? state.detail : null;
-    if (sharesOneFile(animationShape(task, null))) {
-      return (task.checklist ?? []).map((i) => ({ kind: "clip", id: i.name, label: i.name }));
+  function reviewTargets(task2) {
+    const detail = state.detail?.key === task2.key ? state.detail : null;
+    if (sharesOneFile(animationShape(task2, null))) {
+      return (task2.checklist ?? []).map((i) => ({ kind: "clip", id: i.name, label: i.name }));
     }
     if (!detail?.map) return [];
     return Object.entries(detail.map.assets).map(([id, asset]) => ({ kind: "asset", id, label: assetLabel(id, asset) }));
   }
   async function flipThread(key, commentId, status) {
     try {
-      await setThreadStatus(commentId, status, meAccountId, (/* @__PURE__ */ new Date()).toISOString());
+      const at = (/* @__PURE__ */ new Date()).toISOString();
+      await setThreadStatus(commentId, status, meAccountId, at);
       toast(status === "resolved" ? "Resolved" : "Reopened", 1500);
-      void loadReview(key);
+      noteChanged(key, flipped(commentId, status, at));
     } catch (e) {
       void showMessage("Could not change that", e?.message || String(e));
     }
@@ -8566,14 +10718,15 @@ The checklist has been reloaded \u2014 pick the item again.`
     try {
       await addComment(key, text);
       toast("Replied", 1500);
+      if (barReview?.key === key) barReview = null;
       void loadReview(key);
     } catch (e) {
       void showMessage("Could not post that reply", e?.message || String(e));
     }
   }
   async function pushForReview(key) {
-    const task = findTask(key);
-    if (!task) return;
+    const task2 = findTask(key);
+    if (!task2) return;
     await loadTransitions(key);
     const toQa = (state.transitions[key]?.list ?? []).find((t) => /^qa$/i.test(t.to));
     if (!toQa) {
@@ -8592,9 +10745,9 @@ The checklist has been reloaded \u2014 pick the item again.`
         taskKey: key,
         transition: toQa,
         to: toQa.to,
-        from: task.status,
+        from: task2.status,
         map: state.detail?.key === key ? state.detail?.map ?? null : null,
-        root: rootForTask(task)
+        root: rootForTask(task2)
       },
       () => {
         void load(true);
@@ -8623,9 +10776,9 @@ The checklist has been reloaded \u2014 pick the item again.`
       render();
       if (findTask(key)?.status === "Blocked") {
         const reason = await blockedReason(key);
-        const current2 = state.transitions[key];
-        if (current2) {
-          state.transitions = { ...state.transitions, [key]: { ...current2, reason } };
+        const current22 = state.transitions[key];
+        if (current22) {
+          state.transitions = { ...state.transitions, [key]: { ...current22, reason } };
           render();
         }
       }
@@ -8668,13 +10821,13 @@ The checklist has been reloaded \u2014 pick the item again.`
   }
   async function loadTime(day, view) {
     const week = weekOf(day);
-    const current2 = state.time;
+    const current22 = state.time;
     state.time = {
-      view: view ?? current2?.view ?? "day",
+      view: view ?? current22?.view ?? "day",
       day,
       loading: true,
       error: null,
-      logs: current2?.logs ?? []
+      logs: current22?.logs ?? []
     };
     render();
     try {
@@ -8797,7 +10950,7 @@ The checklist has been reloaded \u2014 pick the item again.`
       }
     }
   }
-  function onClick(ev) {
+  function onClick4(ev) {
     const el = ev.target?.closest("[data-act]");
     if (!el) {
       if (state.menu || state.itemMenu) {
@@ -8823,12 +10976,12 @@ The checklist has been reloaded \u2014 pick the item again.`
       }
     }
     const key = el.dataset.key;
-    const task = key ? findTask(key) : null;
+    const task2 = key ? findTask(key) : null;
     const verdict = checkAction(act, {
-      task,
+      task: task2,
       // The task's repository where there is a task, the panel's otherwise. In
       // the Team Tasks view these are different questions with different answers.
-      hasRoot: !!(task ? rootForTask(task) : currentRoot())
+      hasRoot: !!(task2 ? rootForTask(task2) : currentRoot())
     });
     if (!verdict.allowed) {
       toast(verdict.reason, 3500);
@@ -8949,12 +11102,12 @@ The checklist has been reloaded \u2014 pick the item again.`
       void openToolDialog(key2, findTask(key2)?.labels ?? [], () => void load(true));
     } else if (act === "setcomponent") {
       const key2 = el.dataset.key;
-      const task2 = findTask(key2);
+      const task22 = findTask(key2);
       void openComponentDialog(
         key2,
-        task2?.component ?? null,
+        task22?.component ?? null,
         () => void load(true),
-        task2?.labels ?? []
+        task22?.labels ?? []
       );
     } else if (act === "setpriority") {
       const key2 = el.dataset.key;
@@ -9027,6 +11180,9 @@ The checklist has been reloaded \u2014 pick the item again.`
       if (client) void openViewAsPicker(client, realAccountId, () => void load(true));
     } else if (act === "viewaswrites") {
       void toggleWrites(() => render());
+    } else if (act === "reviewbardiag") {
+      updateReviewBar();
+      void showMessage("Review bar", reviewBarDiagnosis(openProject()));
     } else if (act === "clockworktoken") {
       void openTokenDialog(() => {
         void load(true);
@@ -9060,10 +11216,14 @@ The checklist has been reloaded \u2014 pick the item again.`
       void flipThread(el.dataset.key, el.dataset.comment ?? "", "open");
     } else if (act === "replyfb") {
       void replyToThread(el.dataset.key, el.dataset.comment ?? "");
+    } else if (act === "delfb") {
+      void deleteThread(el.dataset.key, el.dataset.comment ?? "");
     } else if (act === "rerequest") {
       void pushForReview(el.dataset.key);
     } else if (act === "openshot") {
       void openShot(el.dataset.shot ?? "");
+    } else if (act === "seeknote") {
+      void seekToNote(el.dataset.key, el.dataset.comment ?? "");
     } else if (act === "tickclips") {
       void tickClips(el.dataset.key);
     } else if (act === "addclips") {
@@ -9244,7 +11404,7 @@ The checklist has been reloaded \u2014 pick the item again.`
     uninstallKumonga();
     const style = document.createElement("style");
     style.id = "embody_jira_css";
-    style.textContent = ALL_CSS + NAG_CSS;
+    style.textContent = ALL_CSS + NAG_CSS + REVIEW_BAR_CSS + NOTE_MARKERS_CSS + ANIM_LIST_CSS + QUIT_DIALOG_CSS;
     document.head.appendChild(style);
     menuActions = [
       new Action("kumonga_open", {
@@ -9376,6 +11536,51 @@ The checklist has been reloaded \u2014 pick the item again.`
       running: runningTimer()?.issueKey ?? externalTimerKey()
     }));
     watchProjects();
+    installReviewBar({
+      context: () => {
+        const p = openProject();
+        const task2 = p?.jiraKey ? findTask(p.jiraKey) : null;
+        if (!task2) return null;
+        const threads = threadsForBar(task2.key);
+        return {
+          task: task2,
+          lead: !!task2.component && state.leadScopes.some((sc) => sc.components.includes(task2.component)),
+          openNotes: threads ? openCounts(threads) : null,
+          resolvedNotes: threads ? resolvedCounts(threads) : null,
+          threads,
+          // The same test readClips and reviewTargets use: any Animation task's
+          // checklist is clips, whatever file they live in.
+          clipsTask: sharesOneFile(animationShape(task2, null)),
+          shots: loadedShots()
+        };
+      },
+      onNote: (taskKey, clip) => {
+        const task2 = findTask(taskKey);
+        void inMainWindow(async () => {
+          const refused = timelineRefusal("newfb", task2);
+          if (refused) {
+            toast(refused, 3500);
+            return;
+          }
+          const item = task2 ? itemForTarget(task2, { kind: "clip", id: clip }) : null;
+          await newFeedback(taskKey, "clip", item?.name ?? clip, item?.name ?? clip);
+        });
+      },
+      onJump: (taskKey, commentId) => void inMainWindow(() => seekToNote(taskKey, commentId)),
+      onResolve: (taskKey, commentId, status) => inMainWindow(async () => {
+        const refused = timelineRefusal(status === "resolved" ? "resolvefb" : "reopenfb", findTask(taskKey));
+        if (refused) throw new Error(refused);
+        await resolveFromTimeline(taskKey, commentId, status);
+      }),
+      onDelete: (taskKey, commentId) => inMainWindow(async () => {
+        const refused = timelineRefusal("delfb", findTask(taskKey));
+        if (refused) {
+          toast(refused, 3500);
+          return false;
+        }
+        return deleteThread(taskKey, commentId);
+      })
+    });
     startPolling();
     startTicking();
     if (runningTimer()) {
@@ -9388,9 +11593,11 @@ The checklist has been reloaded \u2014 pick the item again.`
     stopTicking();
     unwatchProjects();
     uninstallNag();
+    uninstallReviewBar();
     closeChild();
     window.removeEventListener("beforeunload", closeOnQuit);
     window.removeEventListener("beforeunload", warnAboutTimer);
+    window.removeEventListener("beforeunload", warnAboutUnpushed);
     document.getElementById("embody_jira_css")?.remove();
     try {
       barMenu?.label?.remove();
@@ -9436,10 +11643,10 @@ The checklist has been reloaded \u2014 pick the item again.`
   var PLUGIN_ID = "embody_jira";
   var breadcrumb = trace;
   breadcrumb("--- script evaluated ---");
-  function show(title, lines) {
+  function show(title2, lines) {
     new Dialog({
       id: "kumonga_message",
-      title,
+      title: title2,
       lines: [`<pre style="white-space:pre-wrap;font-size:11px;line-height:1.5">${lines.join("\n")}</pre>`],
       buttons: ["Close"]
     }).show();
