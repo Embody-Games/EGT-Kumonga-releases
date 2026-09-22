@@ -11,4 +11,4 @@ Blockbench › Plugins › Install from URL:
 https://raw.githubusercontent.com/Embody-Games/EGT-Kumonga-releases/main/embody_jira.js
 ```
 
-Built from EGT-Kumonga @ `ecc1c7b` on 12 September 2026, 3:20 PM (Brisbane).
+Built from EGT-Kumonga @ `40fcc73` on 22 September 2026, 12:50 PM (Brisbane).
