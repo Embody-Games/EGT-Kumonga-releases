@@ -2516,25 +2516,30 @@
     const overdue = list.filter((t) => dueInfo(t, now)?.state === "over").length;
     return `<span class="ldot s-${name.replace(/[^\w-]/g, "")}"></span><span class="lname">${esc(name.toUpperCase())}</span><span class="lcnt">${list.length}</span>` + (overdue ? `<span class="lbadge over">${overdue} late</span>` : "");
   }
-  function primaryOf(asset, id, detail) {
+  function primaryOf(asset, id, detail, now) {
     const variant = variantsOf(asset)[0] ?? "";
     const version = currentVersion(asset, variant);
-    const r = resolveVersion(asset, id, variant, version, detail);
+    const r = resolveVersion(asset, id, variant, version, detail, now);
     return { variant, version, r };
   }
-  function resolveVersion(asset, id, variant, version, detail) {
+  function resolveVersion(asset, id, variant, version, detail, now) {
     const file2 = version ? asset.variants[variant]?.files[version] ?? null : null;
     return resolveFile(file2, id, variant, detail.disk, {
+      // The ViewModel's clock, never the wall clock: unpulled-vs-missing is a
+      // date rule (a seven-day window), and a call site that let resolveFile
+      // default to Date.now() made a test with absolute fixture dates pass for
+      // a week and then fail on its own, blaming no commit.
+      now: now.getTime(),
       me: detail.me ?? void 0,
       version: version ?? void 0,
       taken: allFiles(asset).map((f) => f.path)
     });
   }
-  function pathCell(asset, id, detail) {
+  function pathCell(asset, id, detail, now) {
     const variants = variantsOf(asset);
-    const { r } = primaryOf(asset, id, detail);
+    const { r } = primaryOf(asset, id, detail, now);
     if (variants.length > 1) {
-      const healthy = variants.filter((v) => resolveVersion(asset, id, v, currentVersion(asset, v), detail).state === "ok").length;
+      const healthy = variants.filter((v) => resolveVersion(asset, id, v, currentVersion(asset, v), detail, now).state === "ok").length;
       const short = variants.length - healthy;
       return `<span class="ipath">${variants.length} variants` + (short ? ` &middot; ${short} need attention` : "") + "</span>";
     }
@@ -2544,8 +2549,8 @@
     if (r.state === "missing") return '<span class="ipath m" title="Recorded here, but nothing is at that path. Locate points at where it went.">missing</span>';
     return '<span class="ipath n">no file yet</span>';
   }
-  function rowFix(asset, id, detail) {
-    const { variant, version, r } = primaryOf(asset, id, detail);
+  function rowFix(asset, id, detail, now) {
+    const { variant, version, r } = primaryOf(asset, id, detail, now);
     if (!version) return "";
     const ref = ` data-key="${esc(detail.key)}" data-asset="${esc(id)}" data-variant="${esc(variant)}" data-version="${esc(version)}"`;
     if (r.state === "moved") {
@@ -2584,7 +2589,7 @@
     return days === 1 ? "yesterday" : `${days} days ago`;
   }
   function subnote(asset, id, detail, vm) {
-    const { r } = primaryOf(asset, id, detail);
+    const { r } = primaryOf(asset, id, detail, vm.now ?? /* @__PURE__ */ new Date());
     if (r.state === "moved") {
       return '<div class="subnote">Recorded at <code>' + esc(r.recorded ?? "") + "</code>, found at <code>" + esc(r.found ?? "") + "</code>. The file identifies itself as this model.</div>";
     }
@@ -2596,7 +2601,7 @@
     }
     return "";
   }
-  function versionChip(asset, id, detail) {
+  function versionChip(asset, id, detail, now) {
     const variants = variantsOf(asset);
     const files = allFiles(asset).length;
     const open = detail.openAsset === id;
@@ -2606,10 +2611,10 @@
     if (variants.length > 1 || asset.mode === "variant") {
       return `<button class="vchip var"${gk}${title2}>${files} file${files === 1 ? "" : "s"} ${arrow}</button>`;
     }
-    const { version } = primaryOf(asset, id, detail);
+    const { version } = primaryOf(asset, id, detail, now);
     return `<button class="vchip${files > 1 ? "" : " one"}"${gk}${title2}>${esc(version ?? "\u2014")}` + (files > 1 ? `<span class="vn"> +${files - 1}</span>` : "") + ` ${arrow}</button>`;
   }
-  function versionList(asset, id, detail) {
+  function versionList(asset, id, detail, now) {
     if (detail.openAsset !== id) return "";
     const multi = variantsOf(asset).length > 1 || asset.mode === "variant";
     let h = '<div class="vlist">';
@@ -2621,7 +2626,7 @@
       }
       for (const version of versions) {
         const file2 = asset.variants[variant].files[version];
-        const r = resolveVersion(asset, id, variant, version, detail);
+        const r = resolveVersion(asset, id, variant, version, detail, now);
         const openable = r.state === "ok" || r.state === "moved";
         const shown = r.state === "moved" ? r.found ?? "" : r.recorded ?? "";
         h += `<div class="vrow${multi ? " ind" : ""}"><span class="vtag${version === current3 ? " cur" : ""}">${esc(version)}</span>` + (file2?.label ? `<span class="vlab">${esc(file2.label)}</span>` : "") + (r.state === "ok" ? `<span class="vpath">${esc(shown)}</span>` : r.state === "moved" ? `<span class="vpath w">${esc(shown)}</span>` : `<span class="vpath m">${esc(r.recorded ?? "missing")}</span>`) + (openable ? `<button class="ib" data-act="open" data-path="${esc(shown)}">Open</button><button class="ib dim" data-act="reveal" data-path="${esc(shown)}" title="Show in the file manager">&#128193;</button>` : "") + (r.state === "moved" ? `<button class="ib warn" data-act="repair" data-key="${esc(detail.key)}" data-asset="${esc(id)}" data-variant="${esc(variant)}" data-version="${esc(version)}" data-old="${esc(r.recorded ?? "")}" data-new="${esc(r.found ?? "")}">Fix</button>` : "") + (r.state === "missing" || r.state === "unpulled" ? `<button class="ib warn" data-act="locate" data-key="${esc(detail.key)}" data-asset="${esc(id)}" data-variant="${esc(variant)}" data-version="${esc(version)}" data-path="${esc(r.recorded ?? "")}" title="Point at the file this record should mean">Locate</button>` : "") + (version === current3 ? "" : `<button class="ib dim" data-act="makecurrent" data-key="${esc(detail.key)}" data-asset="${esc(id)}" data-variant="${esc(variant)}" data-version="${esc(version)}" title="Make this the version that ships">&#9733;</button>`) + `<button class="ib dim" data-act="movefile" data-key="${esc(detail.key)}" data-asset="${esc(id)}" data-variant="${esc(variant)}" data-version="${esc(version)}" data-path="${esc(r.recorded ?? "")}" title="Move or rename this file">&#8644;</button><button class="ib dim" data-act="unlink" data-key="${esc(detail.key)}" data-asset="${esc(id)}" data-variant="${esc(variant)}" data-version="${esc(version)}" data-path="${esc(r.recorded ?? "")}" title="Remove this file from the task. The file itself is not touched.">&#10005;</button></div>`;
@@ -2634,8 +2639,8 @@
     const names = variantsOf(asset);
     return names.length === 1 ? names[0] : names[0] ?? "";
   }
-  function assetWorst(asset, id, detail) {
-    const states = variantsOf(asset).map((v) => resolveVersion(asset, id, v, currentVersion(asset, v), detail).state);
+  function assetWorst(asset, id, detail, now) {
+    const states = variantsOf(asset).map((v) => resolveVersion(asset, id, v, currentVersion(asset, v), detail, now).state);
     return worstState(states);
   }
   function linkedPaths(detail) {
@@ -2836,8 +2841,9 @@
       });
     }
     const [id, asset] = found;
-    const worst = assetWorst(asset, id, detail);
-    const primary = primaryOf(asset, id, detail);
+    const now = vm.now ?? /* @__PURE__ */ new Date();
+    const worst = assetWorst(asset, id, detail, now);
+    const primary = primaryOf(asset, id, detail, now);
     const openPath = primary.r.state === "ok" ? primary.r.recorded : primary.r.state === "moved" ? primary.r.found : null;
     return modelRow({
       openPath,
@@ -2848,13 +2854,13 @@
       name: item.name,
       nameClass,
       byName: oneFile ? clipFb : fbChip(vm, taskKey, "asset", id, item.name),
-      body: clipChip(report, item.name) + pathCell(asset, id, detail),
+      body: clipChip(report, item.name) + pathCell(asset, id, detail, now),
       grow: oneFile,
-      trailing: rowFix(asset, id, detail) + versionChip(asset, id, detail),
+      trailing: rowFix(asset, id, detail, now) + versionChip(asset, id, detail, now),
       end,
       tail: time + renameButton(item, taskKey, id),
       rowClass: stale || worst === "moved" ? "alert" : worst === "missing" || worst === "unpulled" ? "miss" : "",
-      after: subnote(asset, id, detail, vm) + versionList(asset, id, detail)
+      after: subnote(asset, id, detail, vm) + versionList(asset, id, detail, now)
     });
   }
   function assetLabel(id, asset) {
@@ -2866,9 +2872,10 @@
     const claimed = (task2.checklist ?? []).map((i) => i.name);
     const loose = unclaimedAssets(detail.map, claimed);
     if (!loose.length) return "";
+    const now = vm.now ?? /* @__PURE__ */ new Date();
     return loose.map(([id, asset]) => {
-      const worst = assetWorst(asset, id, detail);
-      const primary = primaryOf(asset, id, detail);
+      const worst = assetWorst(asset, id, detail, now);
+      const primary = primaryOf(asset, id, detail, now);
       return modelRow({
         openPath: primary.r.state === "ok" ? primary.r.recorded : primary.r.state === "moved" ? primary.r.found : null,
         // A filled dot rather than a checklist marker: this model answers no item.
@@ -2876,15 +2883,15 @@
         markClass: "m-free",
         name: assetLabel(id, asset),
         nameClass: "",
-        body: pathCell(asset, id, detail),
+        body: pathCell(asset, id, detail, now),
         // Feedback belongs here as much as on a checklist row — more, in fact:
         // most Model/Texture tasks on this instance have no checklist at all, so
         // a loose row IS the deliverable (D-23). Leaving the chip off them made
         // the review unreachable on the majority of tasks (D-65).
         byName: fbChip(vm, task2.key, "asset", id, assetLabel(id, asset)),
-        trailing: rowFix(asset, id, detail) + versionChip(asset, id, detail),
+        trailing: rowFix(asset, id, detail, now) + versionChip(asset, id, detail, now),
         rowClass: worst === "moved" ? "alert" : worst === "missing" || worst === "unpulled" ? "miss" : "",
-        after: subnote(asset, id, detail, vm) + versionList(asset, id, detail)
+        after: subnote(asset, id, detail, vm) + versionList(asset, id, detail, now)
       });
     }).join("");
   }
